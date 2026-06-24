@@ -3,69 +3,79 @@ import sqlite3
 import random
 import string
 import os
-import json
 import requests
+import json
 from datetime import datetime
 
 app = Flask(__name__)
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-BASE_URL = os.getenv("BASE_URL", "").rstrip("/")
-BOT_USERNAME = os.getenv("BOT_USERNAME", "").replace("@", "")
-DB_PATH = os.getenv("DB_PATH", "bot.db")
-QUESTIONS_FILE = os.getenv("QUESTIONS_FILE", "questions.json")
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+BASE_URL = os.environ.get("BASE_URL")
+BOT_USERNAME = os.environ.get("BOT_USERNAME")
+DB_PATH = os.environ.get("DB_PATH", "bot.db")
+QUESTIONS_FILE = os.environ.get("QUESTIONS_FILE", "questions.json")
+
+TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN is not set")
 
-TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
+
+# =========================
+# Helpers
+# =========================
+
+def now():
+    return datetime.utcnow().isoformat()
 
 
-# -----------------------------
-# Telegram Helpers
-# -----------------------------
+def normalize_text(text):
+    if not text:
+        return ""
 
-def tg_request(method, payload=None):
-    url = f"{TELEGRAM_API}/{method}"
+    text = text.strip().lower()
+
+    replacements = {
+        "ي": "ی",
+        "ك": "ک",
+        "ۀ": "ه",
+        "ة": "ه",
+        "ؤ": "و",
+        "إ": "ا",
+        "أ": "ا",
+        "آ": "ا",
+        "‌": " ",
+        "\u200c": " ",
+    }
+
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+
+    text = " ".join(text.split())
+    return text
+
+
+def generate_code(length=8):
+    chars = string.ascii_uppercase + string.digits
+    return "".join(random.choice(chars) for _ in range(length))
+
+
+def load_questions():
     try:
-        r = requests.post(url, json=payload or {}, timeout=10)
-        if not r.ok:
-            print("Telegram API Error:", method, r.status_code, r.text)
-        return r.json()
-    except requests.RequestException as e:
-        print("Telegram request failed:", method, e)
-        return None
+        with open(QUESTIONS_FILE, "r", encoding="utf-8") as f:
+            questions = json.load(f)
 
+        valid_questions = []
+        for q in questions:
+            if q.get("question") and q.get("answer"):
+                valid_questions.append(q)
 
-def send_message(chat_id, text, reply_markup=None):
-    payload = {
-        "chat_id": chat_id,
-        "text": text,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": True
-    }
-    if reply_markup:
-        payload["reply_markup"] = reply_markup
-    return tg_request("sendMessage", payload)
+        return valid_questions
 
+    except Exception as e:
+        print("Load questions error:", e)
+        return []
 
-def answer_callback(callback_query_id, text=None, show_alert=False):
-    payload = {
-        "callback_query_id": callback_query_id,
-        "show_alert": show_alert
-    }
-    if text:
-        payload["text"] = text
-    return tg_request("answerCallbackQuery", payload)
-
-
-def inline_keyboard(buttons):
-    return {"inline_keyboard": buttons}
-
-
-# -----------------------------
-# DB Helpers
-# -----------------------------
 
 def db():
     conn = sqlite3.connect(DB_PATH)
@@ -73,14 +83,76 @@ def db():
     return conn
 
 
+# =========================
+# Telegram API
+# =========================
+
+def tg_request(method, data=None):
+    url = f"{TELEGRAM_API}/{method}"
+
+    try:
+        response = requests.post(url, json=data or {}, timeout=10)
+        if not response.ok:
+            print("Telegram API error:", response.status_code, response.text)
+            return None
+        return response.json()
+
+    except requests.RequestException as e:
+        print("Telegram request exception:", e)
+        return None
+
+
+def send_message(chat_id, text, reply_markup=None):
+    data = {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    }
+
+    if reply_markup:
+        data["reply_markup"] = reply_markup
+
+    return tg_request("sendMessage", data)
+
+
+def answer_callback(callback_query_id, text=None, show_alert=False):
+    data = {
+        "callback_query_id": callback_query_id,
+        "show_alert": show_alert,
+    }
+
+    if text:
+        data["text"] = text
+
+    return tg_request("answerCallbackQuery", data)
+
+
+def inline_keyboard(rows):
+    return {
+        "inline_keyboard": rows
+    }
+
+
+def button(text, callback_data):
+    return {
+        "text": text,
+        "callback_data": callback_data
+    }
+
+
+# =========================
+# Database Init
+# =========================
+
 def init_db():
     with db() as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS games (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                code TEXT NOT NULL UNIQUE,
                 owner_user_id INTEGER NOT NULL,
                 owner_chat_id INTEGER NOT NULL,
-                game_code TEXT UNIQUE NOT NULL,
                 created_at TEXT NOT NULL
             )
         """)
@@ -92,6 +164,7 @@ def init_db():
                 user_id INTEGER NOT NULL,
                 chat_id INTEGER NOT NULL,
                 display_name TEXT NOT NULL,
+                normalized_name TEXT,
                 score INTEGER NOT NULL DEFAULT 0,
                 joined_at TEXT NOT NULL,
                 UNIQUE(game_id, user_id),
@@ -112,6 +185,7 @@ def init_db():
             CREATE TABLE IF NOT EXISTS rounds (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 game_id INTEGER NOT NULL,
+                round_no INTEGER NOT NULL,
                 question TEXT NOT NULL,
                 correct_answer TEXT NOT NULL,
                 status TEXT NOT NULL,
@@ -126,7 +200,8 @@ def init_db():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 round_id INTEGER NOT NULL,
                 player_id INTEGER NOT NULL,
-                eligible INTEGER NOT NULL DEFAULT 0,
+                has_answered INTEGER NOT NULL DEFAULT 0,
+                can_vote INTEGER NOT NULL DEFAULT 0,
                 UNIQUE(round_id, player_id),
                 FOREIGN KEY(round_id) REFERENCES rounds(id),
                 FOREIGN KEY(player_id) REFERENCES players(id)
@@ -139,7 +214,7 @@ def init_db():
                 round_id INTEGER NOT NULL,
                 player_id INTEGER NOT NULL,
                 answer_text TEXT NOT NULL,
-                normalized_text TEXT NOT NULL,
+                normalized_answer TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 UNIQUE(round_id, player_id),
@@ -154,11 +229,12 @@ def init_db():
                 round_id INTEGER NOT NULL,
                 option_no INTEGER NOT NULL,
                 answer_text TEXT NOT NULL,
+                normalized_answer TEXT NOT NULL,
                 is_correct INTEGER NOT NULL DEFAULT 0,
-                owner_player_id INTEGER,
+                player_id INTEGER,
                 UNIQUE(round_id, option_no),
                 FOREIGN KEY(round_id) REFERENCES rounds(id),
-                FOREIGN KEY(owner_player_id) REFERENCES players(id)
+                FOREIGN KEY(player_id) REFERENCES players(id)
             )
         """)
 
@@ -169,7 +245,6 @@ def init_db():
                 voter_player_id INTEGER NOT NULL,
                 option_id INTEGER NOT NULL,
                 created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
                 UNIQUE(round_id, voter_player_id),
                 FOREIGN KEY(round_id) REFERENCES rounds(id),
                 FOREIGN KEY(voter_player_id) REFERENCES players(id),
@@ -177,266 +252,205 @@ def init_db():
             )
         """)
 
+        # Migration برای دیتابیس‌های قدیمی که ستون normalized_name ندارند
+        try:
+            conn.execute("ALTER TABLE players ADD COLUMN normalized_name TEXT")
+        except sqlite3.OperationalError:
+            pass
+
         conn.commit()
 
 
-# -----------------------------
-# Utility
-# -----------------------------
-
-def now():
-    return datetime.utcnow().isoformat()
+init_db()
 
 
-def generate_code(length=8):
-    chars = string.ascii_uppercase + string.digits
-    return "".join(random.choice(chars) for _ in range(length))
-
-
-def normalize_text(text):
-    if not text:
-        return ""
-    text = text.strip().lower()
-    replacements = {
-        "ي": "ی",
-        "ك": "ک",
-        "ۀ": "ه",
-        "ة": "ه",
-        "أ": "ا",
-        "إ": "ا",
-        "آ": "ا"
-    }
-    for old, new in replacements.items():
-        text = text.replace(old, new)
-
-    for ch in ["‌", "\u200c", ".", "،", ",", "!", "؟", "?", ":", ";", "؛", "-", "_", "\"", "'", "«", "»", "(", ")"]:
-        text = text.replace(ch, " ")
-
-    return " ".join(text.split())
-
-
-def load_questions():
-    try:
-        with open(QUESTIONS_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        valid = []
-        for item in data:
-            q = str(item.get("question", "")).strip()
-            a = str(item.get("answer", "")).strip()
-            if q and a:
-                valid.append({"question": q, "answer": a})
-        return valid
-    except Exception as e:
-        print("Questions load error:", e)
-        return []
-
-
-def get_join_link(game_code):
-    if BOT_USERNAME:
-        return f"https://t.me/{BOT_USERNAME}?start=join_{game_code}"
-    return f"لطفاً BOT_USERNAME را در Render تنظیم کن. کد بازی: {game_code}"
-
+# =========================
+# State Management
+# =========================
 
 def set_user_state(user_id, state, data=None):
     with db() as conn:
         conn.execute("""
             INSERT INTO user_states(user_id, state, data, updated_at)
             VALUES (?, ?, ?, ?)
-            ON CONFLICT(user_id) DO UPDATE SET
-                state = excluded.state,
-                data = excluded.data,
-                updated_at = excluded.updated_at
-        """, (user_id, state, json.dumps(data or {}, ensure_ascii=False), now()))
+            ON CONFLICT(user_id)
+            DO UPDATE SET state = excluded.state, data = excluded.data, updated_at = excluded.updated_at
+        """, (
+            user_id,
+            state,
+            json.dumps(data or {}, ensure_ascii=False),
+            now()
+        ))
         conn.commit()
 
 
 def get_user_state(user_id):
     with db() as conn:
-        row = conn.execute("SELECT * FROM user_states WHERE user_id = ?", (user_id,)).fetchone()
-        if not row:
-            return None
-        return {
-            "state": row["state"],
-            "data": json.loads(row["data"] or "{}")
-        }
+        row = conn.execute("""
+            SELECT * FROM user_states
+            WHERE user_id = ?
+        """, (user_id,)).fetchone()
+
+    if not row:
+        return None
+
+    try:
+        data = json.loads(row["data"] or "{}")
+    except Exception:
+        data = {}
+
+    return {
+        "state": row["state"],
+        "data": data
+    }
 
 
 def clear_user_state(user_id):
     with db() as conn:
-        conn.execute("DELETE FROM user_states WHERE user_id = ?", (user_id,))
+        conn.execute("""
+            DELETE FROM user_states
+            WHERE user_id = ?
+        """, (user_id,))
         conn.commit()
 
 
-def get_game_by_code(game_code):
+# =========================
+# Game Queries
+# =========================
+
+def get_game_by_code(code):
     with db() as conn:
-        return conn.execute("SELECT * FROM games WHERE game_code = ?", (game_code,)).fetchone()
+        return conn.execute("""
+            SELECT * FROM games
+            WHERE code = ?
+        """, (code,)).fetchone()
 
 
-def get_game(game_id):
+def get_game_by_id(game_id):
     with db() as conn:
-        return conn.execute("SELECT * FROM games WHERE id = ?", (game_id,)).fetchone()
-
-
-def is_game_owner(game_id, user_id):
-    game = get_game(game_id)
-    return game and int(game["owner_user_id"]) == int(user_id)
+        return conn.execute("""
+            SELECT * FROM games
+            WHERE id = ?
+        """, (game_id,)).fetchone()
 
 
 def get_player(game_id, user_id):
     with db() as conn:
         return conn.execute("""
-            SELECT * FROM players WHERE game_id = ? AND user_id = ?
+            SELECT * FROM players
+            WHERE game_id = ? AND user_id = ?
         """, (game_id, user_id)).fetchone()
 
 
 def get_player_by_id(player_id):
     with db() as conn:
-        return conn.execute("SELECT * FROM players WHERE id = ?", (player_id,)).fetchone()
+        return conn.execute("""
+            SELECT * FROM players
+            WHERE id = ?
+        """, (player_id,)).fetchone()
 
 
-def get_game_players(game_id):
+def get_players(game_id):
     with db() as conn:
         return conn.execute("""
-            SELECT * FROM players WHERE game_id = ? ORDER BY joined_at ASC
+            SELECT * FROM players
+            WHERE game_id = ?
+            ORDER BY id ASC
         """, (game_id,)).fetchall()
 
 
-def get_active_round_for_game(game_id):
+def get_active_round(game_id):
     with db() as conn:
         return conn.execute("""
             SELECT * FROM rounds
-            WHERE game_id = ? AND status IN ('collecting', 'reviewing', 'voting')
+            WHERE game_id = ? AND status != 'finished'
             ORDER BY id DESC
             LIMIT 1
         """, (game_id,)).fetchone()
 
 
-def get_latest_user_active_round(user_id):
+def get_round(round_id):
     with db() as conn:
         return conn.execute("""
-            SELECT 
-                r.*,
-                p.id AS player_id,
-                p.display_name AS display_name,
-                p.game_id AS player_game_id
-            FROM rounds r
-            JOIN round_players rp ON rp.round_id = r.id
-            JOIN players p ON p.id = rp.player_id
-            WHERE p.user_id = ?
-              AND r.status IN ('collecting', 'voting')
-            ORDER BY r.id DESC
-            LIMIT 1
-        """, (user_id,)).fetchone()
+            SELECT * FROM rounds
+            WHERE id = ?
+        """, (round_id,)).fetchone()
 
 
-# -----------------------------
-# Menus
-# -----------------------------
+def is_owner(game, user_id):
+    return int(game["owner_user_id"]) == int(user_id)
 
-def main_menu_for_user(user_id):
-    buttons = [
-        [{"text": "🎮 ساخت بازی جدید", "callback_data": "create_game"}]
-    ]
+
+def join_link(game_code):
+    return f"https://t.me/{BOT_USERNAME}?start=join_{game_code}"
+
+
+# =========================
+# Game Creation / Join
+# =========================
+
+def create_game(user_id, chat_id):
+    if not BOT_USERNAME:
+        send_message(chat_id, "BOT_USERNAME داخل Environment Variables تنظیم نشده.")
+        return
+
+    code = generate_code()
 
     with db() as conn:
-        games = conn.execute("""
-            SELECT * FROM games WHERE owner_user_id = ? ORDER BY id DESC LIMIT 10
-        """, (user_id,)).fetchall()
-
-    for g in games:
-        buttons.append([
-            {"text": f"شروع دور جدید | {g['game_code']}", "callback_data": f"start_round:{g['id']}"}
-        ])
-
-    return inline_keyboard(buttons)
-
-
-def admin_round_keyboard(round_id, stage):
-    if stage == "collecting":
-        return inline_keyboard([
-            [{"text": "✅ پایان ارسال جواب‌ها", "callback_data": f"end_answers:{round_id}"}]
-        ])
-
-    if stage == "confirm_end_answers":
-        return inline_keyboard([
-            [{"text": "✅ آره، تموم کن", "callback_data": f"confirm_end_answers:{round_id}"}],
-            [{"text": "❌ نه، صبر می‌کنم", "callback_data": f"cancel_end_answers:{round_id}"}]
-        ])
-
-    if stage == "reviewing":
-        return inline_keyboard([
-            [{"text": "🗳 شروع رای‌گیری", "callback_data": f"start_voting:{round_id}"}]
-        ])
-
-    if stage == "voting":
-        return inline_keyboard([
-            [{"text": "🏁 پایان رای‌گیری", "callback_data": f"end_voting:{round_id}"}]
-        ])
-
-    if stage == "confirm_end_voting":
-        return inline_keyboard([
-            [{"text": "✅ آره، رای‌گیری رو تموم کن", "callback_data": f"confirm_end_voting:{round_id}"}],
-            [{"text": "❌ نه، ادامه بدیم", "callback_data": f"cancel_end_voting:{round_id}"}]
-        ])
-
-    return None
-
-
-# -----------------------------
-# Game Actions
-# -----------------------------
-
-def create_game(owner_user_id, owner_chat_id):
-    game_code = generate_code()
-    with db() as conn:
-        while conn.execute("SELECT id FROM games WHERE game_code = ?", (game_code,)).fetchone():
-            game_code = generate_code()
+        while conn.execute("SELECT id FROM games WHERE code = ?", (code,)).fetchone():
+            code = generate_code()
 
         conn.execute("""
-            INSERT INTO games(owner_user_id, owner_chat_id, game_code, created_at)
+            INSERT INTO games(code, owner_user_id, owner_chat_id, created_at)
             VALUES (?, ?, ?, ?)
-        """, (owner_user_id, owner_chat_id, game_code, now()))
+        """, (code, user_id, chat_id, now()))
         conn.commit()
 
-    link = get_join_link(game_code)
+    link = join_link(code)
 
-    text = (
-        "🎮 بازی جدید ساخته شد!\n\n"
-        f"کد بازی: <code>{game_code}</code>\n\n"
-        "لینک عضویت بازیکن‌ها:\n"
-        f"{link}\n\n"
-        "این لینک رو برای بقیه بفرست تا بتونند عضو بازی بشند.\n\n"
-        "وقتی حداقل ۳ نفر عضو شدن، می‌تونی دور جدید رو شروع کنی."
+    send_message(
+        chat_id,
+        "بازی جدید ساخته شد.\n\n"
+        f"کد بازی:\n<code>{code}</code>\n\n"
+        f"لینک عضویت:\n{link}\n\n"
+        "این لینک رو برای بچه‌ها بفرست. هرکس وارد بشه، ربات ازش اسم بازی می‌پرسه.",
+        reply_markup=inline_keyboard([
+            [button("شروع دور جدید", f"start_round:{code}")]
+        ])
     )
-    send_message(owner_chat_id, text, main_menu_for_user(owner_user_id))
 
 
 def join_game_start(user_id, chat_id, game_code):
     game = get_game_by_code(game_code)
+
     if not game:
-        send_message(chat_id, "این لینک بازی معتبر نیست یا بازی پیدا نشد.")
+        send_message(chat_id, "این لینک عضویت معتبر نیست یا بازی پیدا نشد.")
         return
 
-    existing = get_player(game["id"], user_id)
-    if existing:
+    existing_player = get_player(game["id"], user_id)
+
+    if existing_player:
         send_message(
             chat_id,
-            f"تو قبلاً عضو این بازی شدی با اسم: <b>{existing['display_name']}</b>\n"
-            "از دور بعدی که مدیر شروع کنه می‌تونی بازی کنی."
+            f"تو قبلاً عضو این بازی شدی با اسم <b>{existing_player['display_name']}</b>."
         )
         return
 
-    set_user_state(user_id, "waiting_display_name", {"game_code": game_code})
+    set_user_state(user_id, "awaiting_name", {
+        "game_code": game_code
+    })
+
     send_message(
         chat_id,
-        "خوش اومدی 😄\n\n"
-        "اسمت رو همینجا بفرست.\n"
-        "امتیازهات و نتایج با همین اسم نمایش داده می‌شن."
+        "خوش اومدی!\n"
+        "برای اینکه وارد بازی بشی، یه اسم برای خودت انتخاب کن و همینجا بفرست.\n\n"
+        "این اسم توی امتیازها و نتایج نمایش داده می‌شه."
     )
 
 
 def save_player_name(user_id, chat_id, display_name, game_code):
     display_name = display_name.strip()
+
     if len(display_name) < 2:
         send_message(chat_id, "اسمت خیلی کوتاهه. یه اسم حداقل ۲ حرفی بفرست.")
         return
@@ -446,44 +460,61 @@ def save_player_name(user_id, chat_id, display_name, game_code):
         return
 
     game = get_game_by_code(game_code)
+
     if not game:
         clear_user_state(user_id)
         send_message(chat_id, "بازی پیدا نشد. دوباره با لینک عضویت وارد شو.")
         return
 
-    with db() as conn:
-        duplicate_name = conn.execute("""
-            SELECT id FROM players
-            WHERE game_id = ? AND normalized_name = ?
-        """, (game["id"], normalize_text(display_name))).fetchone()
+    normalized_name = normalize_text(display_name)
 
-    # اگر ستون normalized_name وجود نداشت، با try پایین هندل می‌کنیم.
     try:
         with db() as conn:
+            duplicate_name = conn.execute("""
+                SELECT id FROM players
+                WHERE game_id = ? AND normalized_name = ?
+            """, (game["id"], normalized_name)).fetchone()
+
+            if duplicate_name:
+                send_message(chat_id, "این اسم توی این بازی قبلاً انتخاب شده. یه اسم دیگه بفرست.")
+                return
+
+            existing_player = conn.execute("""
+                SELECT id FROM players
+                WHERE game_id = ? AND user_id = ?
+            """, (game["id"], user_id)).fetchone()
+
+            if existing_player:
+                clear_user_state(user_id)
+                send_message(chat_id, "تو قبلاً عضو این بازی شدی.")
+                return
+
             conn.execute("""
-                ALTER TABLE players ADD COLUMN normalized_name TEXT
-            """)
+                INSERT INTO players(
+                    game_id,
+                    user_id,
+                    chat_id,
+                    display_name,
+                    normalized_name,
+                    score,
+                    joined_at
+                )
+                VALUES (?, ?, ?, ?, ?, 0, ?)
+            """, (
+                game["id"],
+                user_id,
+                chat_id,
+                display_name,
+                normalized_name,
+                now()
+            ))
+
             conn.commit()
-    except sqlite3.OperationalError:
-        pass
 
-    with db() as conn:
-        duplicate_name = conn.execute("""
-            SELECT id FROM players
-            WHERE game_id = ? AND normalized_name = ?
-        """, (game["id"], normalize_text(display_name))).fetchone()
-
-        if duplicate_name:
-            send_message(chat_id, "این اسم توی این بازی قبلاً انتخاب شده. یه اسم دیگه بفرست.")
-            return
-
-        conn.execute("""
-            INSERT OR IGNORE INTO players(
-                game_id, user_id, chat_id, display_name, normalized_name, score, joined_at
-            )
-            VALUES (?, ?, ?, ?, ?, 0, ?)
-        """, (game["id"], user_id, chat_id, display_name, normalize_text(display_name), now()))
-        conn.commit()
+    except Exception as e:
+        print("Save player name error:", e)
+        send_message(chat_id, "یه خطا موقع ثبت اسمت پیش اومد. لطفاً دوباره امتحان کن.")
+        return
 
     clear_user_state(user_id)
 
@@ -495,670 +526,843 @@ def save_player_name(user_id, chat_id, display_name, game_code):
 
     send_message(
         game["owner_chat_id"],
-        f"👤 بازیکن جدید عضو شد:\n<b>{display_name}</b>"
+        f"بازیکن جدید عضو شد:\n<b>{display_name}</b>"
     )
 
 
-def start_new_round(game_id, admin_user_id, admin_chat_id):
-    if not is_game_owner(game_id, admin_user_id):
-        send_message(admin_chat_id, "این دکمه مخصوص مدیر همین بازیه.")
+# =========================
+# Round Logic
+# =========================
+
+def start_new_round(user_id, chat_id, game_code):
+    game = get_game_by_code(game_code)
+
+    if not game:
+        send_message(chat_id, "بازی پیدا نشد.")
         return
 
-    active = get_active_round_for_game(game_id)
-    if active:
-        send_message(admin_chat_id, "یه دور هنوز تموم نشده. اول همون رو کامل کن.")
+    if not is_owner(game, user_id):
+        send_message(chat_id, "فقط مدیر بازی می‌تونه دور جدید رو شروع کنه.")
         return
 
-    players = get_game_players(game_id)
+    existing_round = get_active_round(game["id"])
+    if existing_round:
+        send_message(chat_id, "یه دور هنوز تموم نشده. اول همون رو کامل کن.")
+        return
+
+    players = get_players(game["id"])
+
     if len(players) < 3:
-        send_message(
-            admin_chat_id,
-            f"تعداد بازیکن‌ها کمه. حداقل ۳ نفر لازمه.\n"
-            f"الان تعداد اعضا: {len(players)}"
-        )
+        send_message(chat_id, "برای شروع بازی حداقل ۳ بازیکن لازم داریم.")
         return
 
     questions = load_questions()
+
     if not questions:
-        send_message(admin_chat_id, "فایل سوال‌ها خالیه یا درست خونده نشد. questions.json رو چک کن.")
+        send_message(chat_id, "فایل سوال‌ها خالیه یا درست خونده نمی‌شه.")
         return
 
-    q = random.choice(questions)
+    selected = random.choice(questions)
 
     with db() as conn:
+        last_round = conn.execute("""
+            SELECT MAX(round_no) AS max_no
+            FROM rounds
+            WHERE game_id = ?
+        """, (game["id"],)).fetchone()
+
+        round_no = (last_round["max_no"] or 0) + 1
+
         cur = conn.execute("""
-            INSERT INTO rounds(game_id, question, correct_answer, status, created_at)
-            VALUES (?, ?, ?, 'collecting', ?)
-        """, (game_id, q["question"], q["answer"], now()))
+            INSERT INTO rounds(
+                game_id,
+                round_no,
+                question,
+                correct_answer,
+                status,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, 'collecting', ?)
+        """, (
+            game["id"],
+            round_no,
+            selected["question"],
+            selected["answer"],
+            now()
+        ))
+
         round_id = cur.lastrowid
 
         for p in players:
             conn.execute("""
-                INSERT INTO round_players(round_id, player_id, eligible)
-                VALUES (?, ?, 0)
+                INSERT INTO round_players(round_id, player_id, has_answered, can_vote)
+                VALUES (?, ?, 0, 0)
             """, (round_id, p["id"]))
 
         conn.commit()
 
-    question_text = (
-        "🎲 دور جدید شروع شد!\n\n"
-        f"سوال:\n<b>{q['question']}</b>\n\n"
-        "حالا یه جواب بامزه، عجیب و گمراه‌کننده بفرست؛ جوری که بقیه فکر کنن جواب درست همونه 😈\n\n"
-        "تا وقتی مدیر مرحله جواب‌دهی رو نبسته، می‌تونی جوابت رو عوض کنی."
-    )
-
     for p in players:
-        send_message(p["chat_id"], question_text)
+        send_message(
+            p["chat_id"],
+            f"دور {round_no} شروع شد!\n\n"
+            f"سوال:\n<b>{selected['question']}</b>\n\n"
+            "یه جواب بفرست که هم به نظرت درست باشه، هم بقیه رو بندازه تو شک!\n"
+            "تا قبل از بسته‌شدن ارسال جواب‌ها، اگر دوباره جواب بفرستی، جواب قبلیت آپدیت می‌شه."
+        )
 
     send_message(
-        admin_chat_id,
-        "دور جدید شروع شد و سوال برای همه اعضای فعلی ارسال شد.\n\n"
-        "هر وقت خواستی مرحله ارسال جواب‌ها رو ببندی، دکمه زیر رو بزن.",
-        admin_round_keyboard(round_id, "collecting")
+        game["owner_chat_id"],
+        f"دور {round_no} شروع شد.\n\n"
+        f"سوال برای {len(players)} نفر ارسال شد.",
+        reply_markup=inline_keyboard([
+            [button("پایان ارسال جواب‌ها", f"end_answers:{round_id}")]
+        ])
     )
 
 
-def submit_fake_answer(user_id, chat_id, text):
-    active = get_latest_user_active_round(user_id)
-
-    if not active:
-        send_message(chat_id, "الان دور فعالی برای جواب دادن یا رای دادن نداری.")
-        return
-
-    if active["status"] == "collecting":
-        submit_answer_collecting(active, user_id, chat_id, text)
-        return
-
-    if active["status"] == "voting":
-        submit_vote(active, user_id, chat_id, text)
-        return
-
-    send_message(chat_id, "الان نمی‌تونی چیزی ثبت کنی. صبر کن مدیر مرحله بعدی رو شروع کنه.")
-
-
-def submit_answer_collecting(active_round, user_id, chat_id, text):
-    answer_text = text.strip()
-    if len(answer_text) < 1:
-        send_message(chat_id, "یه جواب متنی بفرست.")
-        return
-
-    if len(answer_text) > 500:
-        send_message(chat_id, "جوابت خیلی طولانیه. لطفاً کوتاه‌ترش کن.")
-        return
-
-    round_id = active_round["id"]
-    player_id = active_round["player_id"]
-    normalized = normalize_text(answer_text)
-    correct_normalized = normalize_text(active_round["correct_answer"])
-
-    if normalized == correct_normalized:
-        send_message(chat_id, "این جواب تکراریه. یه جواب دیگه بفرست.")
-        return
-
+def handle_answer_message(user_id, chat_id, text):
     with db() as conn:
+        row = conn.execute("""
+            SELECT
+                r.*,
+                p.id AS player_id,
+                p.display_name AS display_name
+            FROM rounds r
+            JOIN round_players rp ON rp.round_id = r.id
+            JOIN players p ON p.id = rp.player_id
+            WHERE p.user_id = ?
+              AND r.status = 'collecting'
+            ORDER BY r.id DESC
+            LIMIT 1
+        """, (user_id,)).fetchone()
+
+        if not row:
+            return False
+
+        round_id = row["id"]
+        player_id = row["player_id"]
+        answer_text = text.strip()
+
+        if len(answer_text) < 1:
+            send_message(chat_id, "جوابت خالیه. یه چیزی بفرست.")
+            return True
+
+        if len(answer_text) > 300:
+            send_message(chat_id, "جوابت خیلی طولانیه. کوتاه‌ترش کن.")
+            return True
+
+        normalized_answer = normalize_text(answer_text)
+        normalized_correct = normalize_text(row["correct_answer"])
+
+        if normalized_answer == normalized_correct:
+            send_message(
+                chat_id,
+                "این جواب تکراری یا خیلی شبیه یکی از گزینه‌هاست. یه جواب دیگه بفرست."
+            )
+            return True
+
         duplicate = conn.execute("""
-            SELECT a.*
+            SELECT a.id
             FROM answers a
             WHERE a.round_id = ?
-              AND a.normalized_text = ?
+              AND a.normalized_answer = ?
               AND a.player_id != ?
-        """, (round_id, normalized, player_id)).fetchone()
+        """, (round_id, normalized_answer, player_id)).fetchone()
 
         if duplicate:
-            send_message(chat_id, "این جواب تکراریه. یه جواب دیگه بفرست.")
-            return
+            send_message(
+                chat_id,
+                "این جواب تکراری یا خیلی شبیه جواب یکی دیگه‌ست. یه جواب دیگه بفرست."
+            )
+            return True
 
         existing = conn.execute("""
-            SELECT id FROM answers WHERE round_id = ? AND player_id = ?
+            SELECT id
+            FROM answers
+            WHERE round_id = ? AND player_id = ?
         """, (round_id, player_id)).fetchone()
 
         if existing:
             conn.execute("""
                 UPDATE answers
-                SET answer_text = ?, normalized_text = ?, updated_at = ?
+                SET answer_text = ?, normalized_answer = ?, updated_at = ?
                 WHERE round_id = ? AND player_id = ?
-            """, (answer_text, normalized, now(), round_id, player_id))
-            msg = "جوابت آپدیت شد ✅"
+            """, (
+                answer_text,
+                normalized_answer,
+                now(),
+                round_id,
+                player_id
+            ))
+
+            message = "جوابت آپدیت شد."
         else:
             conn.execute("""
-                INSERT INTO answers(round_id, player_id, answer_text, normalized_text, created_at, updated_at)
+                INSERT INTO answers(
+                    round_id,
+                    player_id,
+                    answer_text,
+                    normalized_answer,
+                    created_at,
+                    updated_at
+                )
                 VALUES (?, ?, ?, ?, ?, ?)
-            """, (round_id, player_id, answer_text, normalized, now(), now()))
-            msg = "جوابت ثبت شد ✅"
+            """, (
+                round_id,
+                player_id,
+                answer_text,
+                normalized_answer,
+                now(),
+                now()
+            ))
 
-        conn.execute("""
-            UPDATE round_players SET eligible = 1
-            WHERE round_id = ? AND player_id = ?
-        """, (round_id, player_id))
+            conn.execute("""
+                UPDATE round_players
+                SET has_answered = 1
+                WHERE round_id = ? AND player_id = ?
+            """, (round_id, player_id))
+
+            message = "جوابت ثبت شد."
 
         conn.commit()
 
-    send_message(chat_id, msg + "\nحالا صبر کن تا مدیر مرحله جواب‌دهی رو ببنده.")
-
-
-def end_answers(round_id, admin_user_id, admin_chat_id, force=False):
+    send_message(chat_id, message)
+    return True
+def get_missing_answer_players(round_id):
     with db() as conn:
-        r = conn.execute("SELECT * FROM rounds WHERE id = ?", (round_id,)).fetchone()
-
-    if not r:
-        send_message(admin_chat_id, "این دور پیدا نشد.")
-        return
-
-    if not is_game_owner(r["game_id"], admin_user_id):
-        send_message(admin_chat_id, "این دکمه مخصوص مدیر بازیه.")
-        return
-
-    if r["status"] != "collecting":
-        send_message(admin_chat_id, "مرحله جواب‌دهی الان فعال نیست.")
-        return
-
-    with db() as conn:
-        missing = conn.execute("""
-            SELECT p.display_name
+        return conn.execute("""
+            SELECT p.*
             FROM round_players rp
             JOIN players p ON p.id = rp.player_id
-            LEFT JOIN answers a ON a.round_id = rp.round_id AND a.player_id = rp.player_id
-            WHERE rp.round_id = ? AND a.id IS NULL
-            ORDER BY p.display_name ASC
+            WHERE rp.round_id = ?
+              AND rp.has_answered = 0
+            ORDER BY p.id ASC
         """, (round_id,)).fetchall()
 
-        answer_count = conn.execute("""
-            SELECT COUNT(*) AS c FROM answers WHERE round_id = ?
-        """, (round_id,)).fetchone()["c"]
 
-    if answer_count < 2:
-        send_message(admin_chat_id, "حداقل باید ۲ نفر جواب جعلی فرستاده باشن تا بتونی بری مرحله بعد.")
+def close_answers_and_prepare_options(round_id):
+    round_row = get_round(round_id)
+
+    if not round_row:
         return
 
-    if missing and not force:
-        names = "\n".join([f"- {m['display_name']}" for m in missing])
-        send_message(
-            admin_chat_id,
-            "هنوز اینا جواب ندادن:\n"
-            f"{names}\n\n"
-            "می‌خوای با همین وضعیت ارسال جواب‌ها رو تموم کنی؟",
-            admin_round_keyboard(round_id, "confirm_end_answers")
-        )
-        return
+    game = get_game_by_id(round_row["game_id"])
 
-    prepare_options_and_show_to_admin(round_id, admin_chat_id)
-
-
-def prepare_options_and_show_to_admin(round_id, admin_chat_id):
     with db() as conn:
-        r = conn.execute("SELECT * FROM rounds WHERE id = ?", (round_id,)).fetchone()
+        conn.execute("""
+            UPDATE round_players
+            SET can_vote = 1
+            WHERE round_id = ?
+              AND has_answered = 1
+        """, (round_id,))
 
         existing_options = conn.execute("""
-            SELECT COUNT(*) AS c FROM options WHERE round_id = ?
-        """, (round_id,)).fetchone()["c"]
+            SELECT id
+            FROM options
+            WHERE round_id = ?
+            LIMIT 1
+        """, (round_id,)).fetchone()
 
-        if existing_options == 0:
+        if not existing_options:
             answers = conn.execute("""
-                SELECT * FROM answers WHERE round_id = ?
+                SELECT *
+                FROM answers
+                WHERE round_id = ?
             """, (round_id,)).fetchall()
 
             option_items = []
 
-            option_items.append({
-                "answer_text": r["correct_answer"],
-                "is_correct": 1,
-                "owner_player_id": None
-            })
-
             for a in answers:
                 option_items.append({
                     "answer_text": a["answer_text"],
+                    "normalized_answer": a["normalized_answer"],
                     "is_correct": 0,
-                    "owner_player_id": a["player_id"]
+                    "player_id": a["player_id"]
                 })
+
+            option_items.append({
+                "answer_text": round_row["correct_answer"],
+                "normalized_answer": normalize_text(round_row["correct_answer"]),
+                "is_correct": 1,
+                "player_id": None
+            })
 
             random.shuffle(option_items)
 
-            for idx, item in enumerate(option_items, start=1):
+            for index, item in enumerate(option_items, start=1):
                 conn.execute("""
-                    INSERT INTO options(round_id, option_no, answer_text, is_correct, owner_player_id)
-                    VALUES (?, ?, ?, ?, ?)
+                    INSERT INTO options(
+                        round_id,
+                        option_no,
+                        answer_text,
+                        normalized_answer,
+                        is_correct,
+                        player_id
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?)
                 """, (
                     round_id,
-                    idx,
+                    index,
                     item["answer_text"],
+                    item["normalized_answer"],
                     item["is_correct"],
-                    item["owner_player_id"]
+                    item["player_id"]
                 ))
 
         conn.execute("""
-            UPDATE rounds SET status = 'reviewing'
+            UPDATE rounds
+            SET status = 'reviewing'
             WHERE id = ?
         """, (round_id,))
 
-        options = conn.execute("""
-            SELECT * FROM options WHERE round_id = ? ORDER BY option_no ASC
-        """, (round_id,)).fetchall()
-
         conn.commit()
 
-    lines = [
-        "📋 لیست جواب‌ها برای خوندن بلند:",
-        "",
-        "اسم‌ها عمداً نمایش داده نمی‌شن."
-    ]
-
-    for o in options:
-        lines.append("")
-        lines.append(f"{o['option_no']}) {o['answer_text']}")
-
-    lines.append("")
-    lines.append("بعد از اینکه جواب‌ها رو برای همه خوندی، دکمه شروع رای‌گیری رو بزن.")
+    options = get_options(round_id)
+    options_text = format_options(options)
 
     send_message(
-        admin_chat_id,
-        "\n".join(lines),
-        admin_round_keyboard(round_id, "reviewing")
+        game["owner_chat_id"],
+        "ارسال جواب‌ها بسته شد.\n\n"
+        "این لیست جواب‌هاست. اسم فرستنده‌ها رو نشون نمی‌دم.\n"
+        "جواب‌ها رو برای بچه‌ها بلند بخون، بعد بزن روی شروع رای‌گیری:\n\n"
+        f"{options_text}",
+        reply_markup=inline_keyboard([
+            [button("شروع رای‌گیری", f"start_voting:{round_id}")]
+        ])
     )
 
 
-def start_voting(round_id, admin_user_id, admin_chat_id):
+def get_options(round_id):
     with db() as conn:
-        r = conn.execute("SELECT * FROM rounds WHERE id = ?", (round_id,)).fetchone()
-
-    if not r:
-        send_message(admin_chat_id, "این دور پیدا نشد.")
-        return
-
-    if not is_game_owner(r["game_id"], admin_user_id):
-        send_message(admin_chat_id, "این دکمه مخصوص مدیر بازیه.")
-        return
-
-    if r["status"] != "reviewing":
-        send_message(admin_chat_id, "الان وقت شروع رای‌گیری نیست.")
-        return
-
-    with db() as conn:
-        conn.execute("UPDATE rounds SET status = 'voting' WHERE id = ?", (round_id,))
-        options = conn.execute("""
-            SELECT * FROM options WHERE round_id = ? ORDER BY option_no ASC
+        return conn.execute("""
+            SELECT *
+            FROM options
+            WHERE round_id = ?
+            ORDER BY option_no ASC
         """, (round_id,)).fetchall()
 
-        eligible_players = conn.execute("""
-            SELECT p.*
-            FROM round_players rp
-            JOIN players p ON p.id = rp.player_id
-            WHERE rp.round_id = ? AND rp.eligible = 1
-            ORDER BY p.display_name ASC
-        """, (round_id,)).fetchall()
 
-        conn.commit()
-
-    lines = [
-        "🗳 رای‌گیری شروع شد!",
-        "",
-        "به نظرت جواب درست کدومه؟ فقط عدد گزینه رو بفرست.",
-        "",
-        "نکته: نمی‌تونی به جواب خودت رای بدی.",
-        ""
-    ]
-
+def format_options(options):
+    lines = []
     for o in options:
-        lines.append(f"{o['option_no']}) {o['answer_text']}")
-
-    vote_text = "\n".join(lines)
-
-    for p in eligible_players:
-        send_message(p["chat_id"], vote_text)
-
-    send_message(
-        admin_chat_id,
-        "رای‌گیری برای کسانی که جواب جعلی فرستاده بودن شروع شد.\n\n"
-        "هر وقت خواستی پایان رای‌گیری رو بزنی، از دکمه زیر استفاده کن.",
-        admin_round_keyboard(round_id, "voting")
-    )
+        lines.append(f"{o['option_no']}. {o['answer_text']}")
+    return "\n".join(lines)
 
 
-def submit_vote(active_round, user_id, chat_id, text):
-    vote_text = text.strip()
+def request_end_answers(user_id, chat_id, round_id):
+    round_row = get_round(round_id)
 
-    if not vote_text.isdigit():
-        send_message(chat_id, "برای رای دادن فقط عدد گزینه رو بفرست.")
+    if not round_row:
+        send_message(chat_id, "این دور پیدا نشد.")
         return
 
-    option_no = int(vote_text)
-    round_id = active_round["id"]
-    voter_player_id = active_round["player_id"]
+    game = get_game_by_id(round_row["game_id"])
 
-    with db() as conn:
-        eligible = conn.execute("""
-            SELECT eligible FROM round_players
-            WHERE round_id = ? AND player_id = ?
-        """, (round_id, voter_player_id)).fetchone()
-
-        if not eligible or eligible["eligible"] != 1:
-            send_message(chat_id, "تو این دور جواب نفرستادی، پس نمی‌تونی تو رای‌گیری شرکت کنی.")
-            return
-
-        option = conn.execute("""
-            SELECT * FROM options
-            WHERE round_id = ? AND option_no = ?
-        """, (round_id, option_no)).fetchone()
-
-        if not option:
-            send_message(chat_id, "این شماره گزینه وجود نداره. یه عدد درست بفرست.")
-            return
-
-        if option["owner_player_id"] and int(option["owner_player_id"]) == int(voter_player_id):
-            send_message(chat_id, "نمی‌تونی به جواب خودت رای بدی 😄 یه گزینه دیگه انتخاب کن.")
-            return
-
-        existing = conn.execute("""
-            SELECT id FROM votes WHERE round_id = ? AND voter_player_id = ?
-        """, (round_id, voter_player_id)).fetchone()
-
-        if existing:
-            conn.execute("""
-                UPDATE votes
-                SET option_id = ?, updated_at = ?
-                WHERE round_id = ? AND voter_player_id = ?
-            """, (option["id"], now(), round_id, voter_player_id))
-            msg = "رایت آپدیت شد ✅"
-        else:
-            conn.execute("""
-                INSERT INTO votes(round_id, voter_player_id, option_id, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?)
-            """, (round_id, voter_player_id, option["id"], now(), now()))
-            msg = "رایت ثبت شد ✅"
-
-        conn.commit()
-
-    send_message(chat_id, msg + "\nصبر کن تا مدیر رای‌گیری رو تموم کنه.")
-
-
-def end_voting(round_id, admin_user_id, admin_chat_id, force=False):
-    with db() as conn:
-        r = conn.execute("SELECT * FROM rounds WHERE id = ?", (round_id,)).fetchone()
-
-    if not r:
-        send_message(admin_chat_id, "این دور پیدا نشد.")
+    if not is_owner(game, user_id):
+        send_message(chat_id, "فقط مدیر بازی می‌تونه ارسال جواب‌ها رو ببنده.")
         return
 
-    if not is_game_owner(r["game_id"], admin_user_id):
-        send_message(admin_chat_id, "این دکمه مخصوص مدیر بازیه.")
+    if round_row["status"] != "collecting":
+        send_message(chat_id, "الان مرحله ارسال جواب‌ها نیست.")
         return
 
-    if r["status"] != "voting":
-        send_message(admin_chat_id, "رای‌گیری الان فعال نیست.")
-        return
+    missing = get_missing_answer_players(round_id)
 
-    with db() as conn:
-        missing = conn.execute("""
-            SELECT p.display_name
-            FROM round_players rp
-            JOIN players p ON p.id = rp.player_id
-            LEFT JOIN votes v ON v.round_id = rp.round_id AND v.voter_player_id = rp.player_id
-            WHERE rp.round_id = ?
-              AND rp.eligible = 1
-              AND v.id IS NULL
-            ORDER BY p.display_name ASC
-        """, (round_id,)).fetchall()
+    if missing:
+        names = "\n".join([f"- {p['display_name']}" for p in missing])
 
-    if missing and not force:
-        names = "\n".join([f"- {m['display_name']}" for m in missing])
         send_message(
-            admin_chat_id,
-            "هنوز اینا رای ندادن:\n"
+            chat_id,
+            "هنوز اینا جواب ندادن:\n\n"
             f"{names}\n\n"
-            "می‌خوای بدون رای اینا رای‌گیری رو تموم کنی؟",
-            admin_round_keyboard(round_id, "confirm_end_voting")
+            "می‌خوای با همین وضعیت ارسال جواب‌ها رو ببندم؟\n"
+            "کسایی که جواب ندادن، این دور حق رای ندارن و امتیاز هم نمی‌گیرن.",
+            reply_markup=inline_keyboard([
+                [
+                    button("آره، تموم کن", f"force_end_answers:{round_id}"),
+                    button("نه، صبر می‌کنم", f"cancel_action:{round_id}")
+                ]
+            ])
         )
         return
 
-    finalize_round(round_id, admin_chat_id)
+    close_answers_and_prepare_options(round_id)
 
 
-def finalize_round(round_id, admin_chat_id):
+def start_voting(user_id, chat_id, round_id):
+    round_row = get_round(round_id)
+
+    if not round_row:
+        send_message(chat_id, "این دور پیدا نشد.")
+        return
+
+    game = get_game_by_id(round_row["game_id"])
+
+    if not is_owner(game, user_id):
+        send_message(chat_id, "فقط مدیر بازی می‌تونه رای‌گیری رو شروع کنه.")
+        return
+
+    if round_row["status"] != "reviewing":
+        send_message(chat_id, "هنوز نوبت شروع رای‌گیری نیست.")
+        return
+
+    options = get_options(round_id)
+
+    if not options:
+        send_message(chat_id, "گزینه‌ای برای رای‌گیری پیدا نشد.")
+        return
+
+    options_text = format_options(options)
+
     with db() as conn:
-        r = conn.execute("SELECT * FROM rounds WHERE id = ?", (round_id,)).fetchone()
-
-        correct_option = conn.execute("""
-            SELECT * FROM options WHERE round_id = ? AND is_correct = 1
-        """, (round_id,)).fetchone()
-
-        votes = conn.execute("""
-            SELECT 
-                v.*,
-                o.is_correct,
-                o.owner_player_id,
-                o.answer_text,
-                o.option_no,
-                p.display_name AS voter_name
-            FROM votes v
-            JOIN options o ON o.id = v.option_id
-            JOIN players p ON p.id = v.voter_player_id
-            WHERE v.round_id = ?
+        voters = conn.execute("""
+            SELECT p.*
+            FROM round_players rp
+            JOIN players p ON p.id = rp.player_id
+            WHERE rp.round_id = ?
+              AND rp.can_vote = 1
+            ORDER BY p.id ASC
         """, (round_id,)).fetchall()
-
-        round_points = {}
-
-        correct_voters = []
-        for v in votes:
-            if v["is_correct"] == 1:
-                round_points[v["voter_player_id"]] = round_points.get(v["voter_player_id"], 0) + 1
-                correct_voters.append(v["voter_name"])
-            else:
-                if v["owner_player_id"]:
-                    round_points[v["owner_player_id"]] = round_points.get(v["owner_player_id"], 0) + 1
-
-        for player_id, pts in round_points.items():
-            conn.execute("""
-                UPDATE players SET score = score + ?
-                WHERE id = ?
-            """, (pts, player_id))
-
-        wrong_options = conn.execute("""
-            SELECT 
-                o.*,
-                p.display_name AS owner_name,
-                COUNT(v.id) AS vote_count
-            FROM options o
-            LEFT JOIN votes v ON v.option_id = o.id
-            LEFT JOIN players p ON p.id = o.owner_player_id
-            WHERE o.round_id = ? AND o.is_correct = 0
-            GROUP BY o.id
-            HAVING vote_count > 0
-            ORDER BY vote_count DESC, o.option_no ASC
-        """, (round_id,)).fetchall()
-
-        scoreboard = conn.execute("""
-            SELECT * FROM players
-            WHERE game_id = ?
-            ORDER BY score DESC, display_name ASC
-        """, (r["game_id"],)).fetchall()
-
-        all_players = conn.execute("""
-            SELECT * FROM players
-            WHERE game_id = ?
-        """, (r["game_id"],)).fetchall()
 
         conn.execute("""
             UPDATE rounds
-            SET status = 'finished', finished_at = ?
+            SET status = 'voting'
+            WHERE id = ?
+        """, (round_id,))
+
+        conn.commit()
+
+    for p in voters:
+        send_message(
+            p["chat_id"],
+            "رای‌گیری شروع شد.\n\n"
+            "عدد گزینه‌ای که فکر می‌کنی جواب درست است رو بفرست.\n"
+            "حواست باشه نمی‌تونی به جواب خودت رای بدی.\n\n"
+            f"{options_text}"
+        )
+
+    send_message(
+        game["owner_chat_id"],
+        f"رای‌گیری برای {len(voters)} نفر شروع شد.",
+        reply_markup=inline_keyboard([
+            [button("پایان رای‌گیری", f"end_voting:{round_id}")]
+        ])
+    )
+
+
+def handle_vote_message(user_id, chat_id, text):
+    if not text.strip().isdigit():
+        return False
+
+    selected_no = int(text.strip())
+
+    with db() as conn:
+        row = conn.execute("""
+            SELECT
+                r.id AS round_id,
+                r.status AS status,
+                p.id AS player_id,
+                p.display_name AS display_name
+            FROM rounds r
+            JOIN round_players rp ON rp.round_id = r.id
+            JOIN players p ON p.id = rp.player_id
+            WHERE p.user_id = ?
+              AND r.status = 'voting'
+              AND rp.can_vote = 1
+            ORDER BY r.id DESC
+            LIMIT 1
+        """, (user_id,)).fetchone()
+
+        if not row:
+            return False
+
+        round_id = row["round_id"]
+        voter_player_id = row["player_id"]
+
+        option = conn.execute("""
+            SELECT *
+            FROM options
+            WHERE round_id = ?
+              AND option_no = ?
+        """, (round_id, selected_no)).fetchone()
+
+        if not option:
+            send_message(chat_id, "همچین گزینه‌ای نداریم. فقط عدد یکی از گزینه‌ها رو بفرست.")
+            return True
+
+        if option["player_id"] and int(option["player_id"]) == int(voter_player_id):
+            send_message(chat_id, "نمی‌تونی به جواب خودت رای بدی. یه گزینه دیگه انتخاب کن.")
+            return True
+
+        existing_vote = conn.execute("""
+            SELECT id
+            FROM votes
+            WHERE round_id = ?
+              AND voter_player_id = ?
+        """, (round_id, voter_player_id)).fetchone()
+
+        if existing_vote:
+            conn.execute("""
+                UPDATE votes
+                SET option_id = ?, created_at = ?
+                WHERE round_id = ?
+                  AND voter_player_id = ?
+            """, (
+                option["id"],
+                now(),
+                round_id,
+                voter_player_id
+            ))
+
+            message = "رایت آپدیت شد."
+        else:
+            conn.execute("""
+                INSERT INTO votes(
+                    round_id,
+                    voter_player_id,
+                    option_id,
+                    created_at
+                )
+                VALUES (?, ?, ?, ?)
+            """, (
+                round_id,
+                voter_player_id,
+                option["id"],
+                now()
+            ))
+
+            message = "رایت ثبت شد."
+
+        conn.commit()
+
+    send_message(chat_id, message)
+    return True
+
+
+def get_missing_vote_players(round_id):
+    with db() as conn:
+        return conn.execute("""
+            SELECT p.*
+            FROM round_players rp
+            JOIN players p ON p.id = rp.player_id
+            LEFT JOIN votes v
+                ON v.round_id = rp.round_id
+               AND v.voter_player_id = p.id
+            WHERE rp.round_id = ?
+              AND rp.can_vote = 1
+              AND v.id IS NULL
+            ORDER BY p.id ASC
+        """, (round_id,)).fetchall()
+
+
+def request_end_voting(user_id, chat_id, round_id):
+    round_row = get_round(round_id)
+
+    if not round_row:
+        send_message(chat_id, "این دور پیدا نشد.")
+        return
+
+    game = get_game_by_id(round_row["game_id"])
+
+    if not is_owner(game, user_id):
+        send_message(chat_id, "فقط مدیر بازی می‌تونه رای‌گیری رو تموم کنه.")
+        return
+
+    if round_row["status"] != "voting":
+        send_message(chat_id, "الان مرحله رای‌گیری نیست.")
+        return
+
+    missing = get_missing_vote_players(round_id)
+
+    if missing:
+        names = "\n".join([f"- {p['display_name']}" for p in missing])
+
+        send_message(
+            chat_id,
+            "هنوز اینا رای ندادن:\n\n"
+            f"{names}\n\n"
+            "می‌خوای با همین وضعیت رای‌گیری رو تموم کنم؟",
+            reply_markup=inline_keyboard([
+                [
+                    button("آره، تموم کن", f"force_end_voting:{round_id}"),
+                    button("نه، صبر می‌کنم", f"cancel_action:{round_id}")
+                ]
+            ])
+        )
+        return
+
+    finalize_round(round_id)
+
+
+def finalize_round(round_id):
+    round_row = get_round(round_id)
+
+    if not round_row:
+        return
+
+    game = get_game_by_id(round_row["game_id"])
+    players = get_players(game["id"])
+
+    with db() as conn:
+        correct_option = conn.execute("""
+            SELECT *
+            FROM options
+            WHERE round_id = ?
+              AND is_correct = 1
+            LIMIT 1
+        """, (round_id,)).fetchone()
+
+        correct_voters = conn.execute("""
+            SELECT p.*
+            FROM votes v
+            JOIN players p ON p.id = v.voter_player_id
+            WHERE v.round_id = ?
+              AND v.option_id = ?
+            ORDER BY p.display_name ASC
+        """, (round_id, correct_option["id"])).fetchall()
+
+        for p in correct_voters:
+            conn.execute("""
+                UPDATE players
+                SET score = score + 1
+                WHERE id = ?
+            """, (p["id"],))
+
+        fake_results = conn.execute("""
+            SELECT
+                o.id AS option_id,
+                o.answer_text AS answer_text,
+                o.player_id AS answer_owner_id,
+                p.display_name AS owner_name,
+                COUNT(v.id) AS vote_count
+            FROM options o
+            JOIN players p ON p.id = o.player_id
+            LEFT JOIN votes v ON v.option_id = o.id
+            WHERE o.round_id = ?
+              AND o.is_correct = 0
+            GROUP BY o.id
+            ORDER BY vote_count DESC, o.option_no ASC
+        """, (round_id,)).fetchall()
+
+        for item in fake_results:
+            vote_count = int(item["vote_count"] or 0)
+            if vote_count > 0:
+                conn.execute("""
+                    UPDATE players
+                    SET score = score + ?
+                    WHERE id = ?
+                """, (
+                    vote_count,
+                    item["answer_owner_id"]
+                ))
+
+        conn.execute("""
+            UPDATE rounds
+            SET status = 'finished',
+                finished_at = ?
             WHERE id = ?
         """, (now(), round_id))
 
         conn.commit()
 
-    result_lines = [
-        "🏁 نتیجه این دور",
-        "",
-        f"✅ جواب درست:\n<b>{correct_option['answer_text']}</b>",
-        "",
-        "کسایی که جواب درست رو انتخاب کردن:"
-    ]
+        scoreboard = conn.execute("""
+            SELECT *
+            FROM players
+            WHERE game_id = ?
+            ORDER BY score DESC, display_name ASC
+        """, (game["id"],)).fetchall()
 
     if correct_voters:
-        for name in correct_voters:
-            result_lines.append(f"- {name}")
+        correct_names = "\n".join([f"- {p['display_name']}" for p in correct_voters])
     else:
-        result_lines.append("- هیچ‌کس 😄")
+        correct_names = "هیچ‌کس جواب درست رو انتخاب نکرد."
 
-    result_lines.append("")
-    result_lines.append("────────────")
-    result_lines.append("")
-    result_lines.append("جواب‌های اشتباهی که بقیه رو گول زدن:")
+    fake_lines = []
 
-    if wrong_options:
-        for wo in wrong_options:
-            result_lines.append("")
-            result_lines.append(
-                f"گزینه {wo['option_no']} | {wo['vote_count']} رای\n"
-                f"متن: {wo['answer_text']}\n"
-                f"فرستنده: {wo['owner_name']}"
-            )
+    for item in fake_results:
+        fake_lines.append(
+            f"- {item['answer_text']}\n"
+            f"  فرستنده: <b>{item['owner_name']}</b> | رای: {item['vote_count']}"
+        )
+
+    if not fake_lines:
+        fake_lines_text = "جواب اشتباهی ثبت نشده بود."
     else:
-        result_lines.append("- هیچ جواب اشتباهی رای نگرفت.")
+        fake_lines_text = "\n\n".join(fake_lines)
 
-    scores_lines = [
-        "🏆 جدول امتیازها",
-        ""
-    ]
+    result_text = (
+        f"نتیجه دور {round_row['round_no']}\n\n"
+        f"جواب درست:\n<b>{round_row['correct_answer']}</b>\n\n"
+        "کسایی که جواب درست رو پیدا کردن:\n"
+        f"{correct_names}\n\n"
+        "--------------------\n\n"
+        "جواب‌های اشتباه به ترتیب بیشترین رای:\n\n"
+        f"{fake_lines_text}"
+    )
 
-    for idx, p in enumerate(scoreboard, start=1):
-        scores_lines.append(f"{idx}. {p['display_name']} — {p['score']} امتیاز")
+    score_lines = []
+    for index, p in enumerate(scoreboard, start=1):
+        score_lines.append(f"{index}. {p['display_name']} — {p['score']} امتیاز")
 
-    result_text = "\n".join(result_lines)
-    scores_text = "\n".join(scores_lines)
+    scoreboard_text = (
+        "جدول امتیازها:\n\n"
+        + "\n".join(score_lines)
+    )
 
-    for p in all_players:
+    for p in players:
         send_message(p["chat_id"], result_text)
-        send_message(p["chat_id"], scores_text)
+        send_message(p["chat_id"], scoreboard_text)
 
-    game = get_game(r["game_id"])
     send_message(
         game["owner_chat_id"],
-        "اگه خواستی دور بعدی رو شروع کنی، از دکمه زیر استفاده کن.",
-        inline_keyboard([
-            [{"text": "🎲 شروع دور جدید", "callback_data": f"start_round:{r['game_id']}"}]
+        "این دور تموم شد. هر وقت آماده بودی، دور جدید رو شروع کن.",
+        reply_markup=inline_keyboard([
+            [button("شروع دور جدید", f"start_round:{game['code']}")]
         ])
     )
 
 
-# -----------------------------
-# Update Handlers
-# -----------------------------
-
-def handle_start(message, args):
-    chat_id = message["chat"]["id"]
-    user_id = message["from"]["id"]
-
-    if args and args.startswith("join_"):
-        game_code = args.replace("join_", "", 1).strip().upper()
-        join_game_start(user_id, chat_id, game_code)
-        return
-
-    text = (
-        "سلام 😄\n"
-        "به بازی شیاد خوش اومدی.\n\n"
-        "یه بازی هیجان انگیز و شاد برای دورهمی ها.\n"
-        "برای ساخت بازی به عنوان مدیر روی دکمه زیر بزن."
-    )
-    send_message(chat_id, text, main_menu_for_user(user_id))
-
-
-def handle_message(message):
-    chat_id = message["chat"]["id"]
-    user_id = message["from"]["id"]
-    text = message.get("text", "").strip()
-
-    if not text:
-        return
-
-    if text.startswith("/start"):
-        parts = text.split(maxsplit=1)
-        args = parts[1].strip() if len(parts) > 1 else ""
-        handle_start(message, args)
-        return
-
-    state = get_user_state(user_id)
-    if state and state["state"] == "waiting_display_name":
-        game_code = state["data"].get("game_code")
-        save_player_name(user_id, chat_id, text, game_code)
-        return
-
-    submit_fake_answer(user_id, chat_id, text)
-
+# =========================
+# Callback Handler
+# =========================
 
 def handle_callback(callback):
     callback_id = callback["id"]
     data = callback.get("data", "")
-    message = callback.get("message", {})
-    chat_id = message.get("chat", {}).get("id")
     user_id = callback["from"]["id"]
+    chat_id = callback["message"]["chat"]["id"]
 
     answer_callback(callback_id)
 
-    if data == "create_game":
+    try:
+        action, value = data.split(":", 1)
+    except ValueError:
+        send_message(chat_id, "دکمه نامعتبره.")
+        return
+
+    if action == "start_round":
+        start_new_round(user_id, chat_id, value)
+
+    elif action == "end_answers":
+        request_end_answers(user_id, chat_id, int(value))
+
+    elif action == "force_end_answers":
+        round_id = int(value)
+        round_row = get_round(round_id)
+        if not round_row:
+            send_message(chat_id, "این دور پیدا نشد.")
+            return
+
+        game = get_game_by_id(round_row["game_id"])
+        if not is_owner(game, user_id):
+            send_message(chat_id, "فقط مدیر بازی اجازه این کار رو داره.")
+            return
+
+        close_answers_and_prepare_options(round_id)
+
+    elif action == "start_voting":
+        start_voting(user_id, chat_id, int(value))
+
+    elif action == "end_voting":
+        request_end_voting(user_id, chat_id, int(value))
+
+    elif action == "force_end_voting":
+        round_id = int(value)
+        round_row = get_round(round_id)
+        if not round_row:
+            send_message(chat_id, "این دور پیدا نشد.")
+            return
+
+        game = get_game_by_id(round_row["game_id"])
+        if not is_owner(game, user_id):
+            send_message(chat_id, "فقط مدیر بازی اجازه این کار رو داره.")
+            return
+
+        finalize_round(round_id)
+
+    elif action == "cancel_action":
+        send_message(chat_id, "باشه، فعلاً ادامه می‌دیم.")
+
+    else:
+        send_message(chat_id, "این عملیات شناخته‌شده نیست.")
+
+
+# =========================
+# Message Handler
+# =========================
+
+def handle_message(message):
+    chat = message.get("chat", {})
+    user = message.get("from", {})
+
+    chat_id = chat.get("id")
+    user_id = user.get("id")
+    text = message.get("text", "")
+
+    if not chat_id or not user_id or not text:
+        return
+
+    text = text.strip()
+
+    if text.startswith("/start"):
+        parts = text.split(maxsplit=1)
+
+        if len(parts) == 2 and parts[1].startswith("join_"):
+            game_code = parts[1].replace("join_", "", 1).strip()
+            join_game_start(user_id, chat_id, game_code)
+            return
+
+        send_message(
+            chat_id,
+            "سلام! من ربات بازی جواب‌های گمراه‌کننده‌ام.\n\n"
+            "اگر مدیر بازی هستی، با دستور /newgame یه بازی جدید بساز.\n"
+            "اگر بازیکنی، باید با لینک عضویت مدیر وارد بشی."
+        )
+        return
+
+    if text == "/newgame":
         create_game(user_id, chat_id)
         return
 
-    if data.startswith("start_round:"):
-        game_id = int(data.split(":")[1])
-        start_new_round(game_id, user_id, chat_id)
-        return
-
-    if data.startswith("end_answers:"):
-        round_id = int(data.split(":")[1])
-        end_answers(round_id, user_id, chat_id, force=False)
-        return
-
-    if data.startswith("confirm_end_answers:"):
-        round_id = int(data.split(":")[1])
-        end_answers(round_id, user_id, chat_id, force=True)
-        return
-
-    if data.startswith("cancel_end_answers:"):
-        round_id = int(data.split(":")[1])
+    if text == "/help":
         send_message(
             chat_id,
-            "باشه، هنوز فرصت جواب دادن هست.\nهر وقت خواستی دوباره پایان ارسال جواب‌ها رو بزن.",
-            admin_round_keyboard(round_id, "collecting")
+            "دستورها:\n\n"
+            "/newgame ساخت بازی جدید\n"
+            "/start شروع کار با ربات"
         )
         return
 
-    if data.startswith("start_voting:"):
-        round_id = int(data.split(":")[1])
-        start_voting(round_id, user_id, chat_id)
+    state = get_user_state(user_id)
+
+    if state and state["state"] == "awaiting_name":
+        game_code = state["data"].get("game_code")
+        save_player_name(user_id, chat_id, text, game_code)
         return
 
-    if data.startswith("end_voting:"):
-        round_id = int(data.split(":")[1])
-        end_voting(round_id, user_id, chat_id, force=False)
+    if handle_answer_message(user_id, chat_id, text):
         return
 
-    if data.startswith("confirm_end_voting:"):
-        round_id = int(data.split(":")[1])
-        end_voting(round_id, user_id, chat_id, force=True)
+    if handle_vote_message(user_id, chat_id, text):
         return
 
-    if data.startswith("cancel_end_voting:"):
-        round_id = int(data.split(":")[1])
-        send_message(
-            chat_id,
-            "باشه، رای‌گیری هنوز ادامه داره.\nهر وقت خواستی دوباره پایان رای‌گیری رو بزن.",
-            admin_round_keyboard(round_id, "voting")
-        )
-        return
-
-    send_message(chat_id, "دستور ناشناخته بود.")
+    send_message(
+        chat_id,
+        "الان منتظر این پیام نبودم.\n"
+        "اگر می‌خوای وارد بازی بشی، از لینک عضویت استفاده کن."
+    )
 
 
-# -----------------------------
+# =========================
 # Flask Routes
-# -----------------------------
+# =========================
 
 @app.route("/", methods=["GET"])
-def index():
+def home():
     return jsonify({
         "ok": True,
-        "service": "creative-game-telegram-bot",
-        "webhook": "/telegram/webhook"
+        "service": "telegram-game-bot",
+        "time": now()
     })
 
 
@@ -1169,8 +1373,10 @@ def telegram_webhook():
     try:
         if "message" in update:
             handle_message(update["message"])
+
         elif "callback_query" in update:
             handle_callback(update["callback_query"])
+
     except Exception as e:
         print("Webhook handling error:", e)
 
@@ -1185,8 +1391,12 @@ def set_webhook():
             "error": "BASE_URL is not set"
         }), 400
 
-    webhook_url = f"{BASE_URL}/telegram/webhook"
-    result = tg_request("setWebhook", {"url": webhook_url})
+    webhook_url = f"{BASE_URL.rstrip('/')}/telegram/webhook"
+
+    result = tg_request("setWebhook", {
+        "url": webhook_url,
+        "drop_pending_updates": True
+    })
 
     return jsonify({
         "ok": True,
@@ -1197,15 +1407,16 @@ def set_webhook():
 
 @app.route("/delete-webhook", methods=["GET"])
 def delete_webhook():
-    result = tg_request("deleteWebhook", {})
+    result = tg_request("deleteWebhook", {
+        "drop_pending_updates": True
+    })
+
     return jsonify({
         "ok": True,
         "telegram_result": result
     })
 
 
-init_db()
-
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", "5000"))
+    port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
