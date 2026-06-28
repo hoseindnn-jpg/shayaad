@@ -10,12 +10,18 @@ from datetime import datetime
 
 # ==================== CONFIG ====================
 app = Flask(__name__)
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+BASE_URL = os.environ.get("BASE_URL")
+BOT_USERNAME = os.environ.get("BOT_USERNAME")
+DB_PATH = os.environ.get("DB_PATH", "bot.db")
+QUESTIONS_FILE = os.environ.get("QUESTIONS_FILE", "questions.json")
 
-BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"
-BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
-BOT_USERNAME = "YOUR_BOT_USERNAME"
-DB_PATH = "game.db"
-QUESTIONS_FILE = "questions.json"
+TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
+
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN is not set")
+
+
 
 # ==================== HELPERS ====================
 def now():
