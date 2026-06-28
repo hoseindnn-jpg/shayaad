@@ -202,6 +202,8 @@ def init_db():
                 player_id INTEGER NOT NULL,
                 has_answered INTEGER NOT NULL DEFAULT 0,
                 can_vote INTEGER NOT NULL DEFAULT 0,
+                score INTEGER NOT NULL DEFAULT 0,
+                penalty INTEGER NOT NULL DEFAULT 0,
                 UNIQUE(round_id, player_id),
                 FOREIGN KEY(round_id) REFERENCES rounds(id),
                 FOREIGN KEY(player_id) REFERENCES players(id)
@@ -258,10 +260,29 @@ def init_db():
         except sqlite3.OperationalError:
             pass
 
+        # Migration: اضافه کردن ستون score و penalty به round_players
+        try:
+            conn.execute("ALTER TABLE round_players ADD COLUMN score INTEGER NOT NULL DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass
+
+        try:
+            conn.execute("ALTER TABLE round_players ADD COLUMN penalty INTEGER NOT NULL DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass
+
         conn.commit()
 
 
 init_db()
+
+# ═══════════════════════════════════════════
+# Penalty System — State
+# ═══════════════════════════════════════════
+
+# دیکشنری موقت: mapping عدد → player_id برای انتخاب بازیکن جهت جریمه
+# ساختار: {round_id: {1: player_id, 2: player_id, ...}}
+_penalty_mappings = {}
 
 
 # =========================
@@ -595,8 +616,8 @@ def start_new_round(user_id, chat_id, game_code):
 
         for p in players:
             conn.execute("""
-                INSERT INTO round_players(round_id, player_id, has_answered, can_vote)
-                VALUES (?, ?, 0, 0)
+                INSERT INTO round_players(round_id, player_id, has_answered, can_vote, score, penalty)
+                VALUES (?, ?, 0, 0, 0, 0)
             """, (round_id, p["id"]))
 
         conn.commit()
@@ -606,7 +627,9 @@ def start_new_round(user_id, chat_id, game_code):
             p["chat_id"],
             f"دور {round_no} شروع شد!\n\n"
             f"سوال:\n<b>{selected['question']}</b>\n\n"
-            "یه جواب بفرست که به نظرت درست باشه و بقیه رو گمراه کنه. حواست باشه اگه جواب درست رو می دونی نباید همون رو بفرستی چون توسط مدیر جریمه میشی!\n"
+            "یه جواب بفرست که هم به نظرت درست باشه، هم بقیه رو بندازه تو شک!\n"
+            "حتی اگه جواب درست رو می‌دونی، یه جواب دیگه بگو — اگه جوابت شبیه جواب درست باشه، "
+            "مدیر می‌تونه جریمه‌ات کنه و امتیاز این دورت صفر بشه.\n\n"
             "تا قبل از بسته‌شدن ارسال جواب‌ها، اگر دوباره جواب بفرستی، جواب قبلیت آپدیت می‌شه."
         )
 
@@ -657,7 +680,8 @@ def handle_answer_message(user_id, chat_id, text):
         if normalized_answer == normalized_correct:
             send_message(
                 chat_id,
-                "این جواب تکراری یا خیلی شبیه یکی از گزینه‌هاست. یه جواب دیگه بفرست."
+                "این جواب دقیقاً شبیه جواب درسته. یه جواب دیگه بفرست — "
+                "اگه جواب درست رو می‌دونی، یه جواب گمراه‌کننده بده."
             )
             return True
 
@@ -728,6 +752,8 @@ def handle_answer_message(user_id, chat_id, text):
 
     send_message(chat_id, message)
     return True
+
+
 def get_missing_answer_players(round_id):
     with db() as conn:
         return conn.execute("""
@@ -1121,7 +1147,12 @@ def finalize_round(round_id):
             ORDER BY p.display_name ASC
         """, (round_id, correct_option["id"])).fetchall()
 
+        # دیکشنری امتیازات این دور (player_id → round_score)
+        round_scores = {}
+
+        # رأی‌دهندگان درست: +1
         for p in correct_voters:
+            round_scores[p["id"]] = round_scores.get(p["id"], 0) + 1
             conn.execute("""
                 UPDATE players
                 SET score = score + 1
@@ -1147,6 +1178,9 @@ def finalize_round(round_id):
         for item in fake_results:
             vote_count = int(item["vote_count"] or 0)
             if vote_count > 0:
+                round_scores[item["answer_owner_id"]] = (
+                    round_scores.get(item["answer_owner_id"], 0) + vote_count
+                )
                 conn.execute("""
                     UPDATE players
                     SET score = score + ?
@@ -1155,6 +1189,14 @@ def finalize_round(round_id):
                     vote_count,
                     item["answer_owner_id"]
                 ))
+
+        # ذخیره امتیازات هر بازیکن در round_players
+        for player_id, score in round_scores.items():
+            conn.execute("""
+                UPDATE round_players
+                SET score = ?
+                WHERE round_id = ? AND player_id = ?
+            """, (score, round_id, player_id))
 
         conn.execute("""
             UPDATE rounds
@@ -1172,13 +1214,13 @@ def finalize_round(round_id):
             ORDER BY score DESC, display_name ASC
         """, (game["id"],)).fetchall()
 
+    # ── ساخت متن نتایج ──
     if correct_voters:
         correct_names = "\n".join([f"- {p['display_name']}" for p in correct_voters])
     else:
         correct_names = "هیچ‌کس جواب درست رو انتخاب نکرد."
 
     fake_lines = []
-
     for item in fake_results:
         fake_lines.append(
             f"- {item['answer_text']}\n"
@@ -1209,17 +1251,197 @@ def finalize_round(round_id):
         + "\n".join(score_lines)
     )
 
+    # ── ارسال به بازیکن‌ها ──
+    admin_id = int(game["owner_user_id"])
+    admin_is_player = any(int(p["user_id"]) == admin_id for p in players)
+
     for p in players:
         send_message(p["chat_id"], result_text)
         send_message(p["chat_id"], scoreboard_text)
 
-    send_message(
-        game["owner_chat_id"],
-        "این دور تموم شد. هر وقت آماده بودی، دور جدید رو شروع کن.",
-        reply_markup=inline_keyboard([
-            [button("شروع دور جدید", f"start_round:{game['code']}")]
+    # ── ارسال به مدیر ──
+    owner_keyboard_rows = [
+        [button("🚀 شروع دور جدید", f"start_round:{game['code']}")],
+        [button("🚫 ثبت جریمه", f"penalty_start:{round_id}")]
+    ]
+
+    if admin_is_player:
+        # مدیر خودش بازیکنه — دکمه جریمه رو فقط برای مدیر جداگانه بفرست
+        admin_player = next(p for p in players if int(p["user_id"]) == admin_id)
+        send_message(
+            admin_player["chat_id"],
+            "🔍 **پنل مدیریت:**\nمی‌تونی بازیکنی که جوابش شبیه جواب درست بوده رو جریمه کنی.",
+            reply_markup=inline_keyboard(owner_keyboard_rows)
+        )
+    else:
+        # مدیر بازیکن نیست — نتایج + دکمه‌ها رو براش بفرست
+        send_message(
+            game["owner_chat_id"],
+            f"🔍 **نتایج دور (نظارت مدیر):**\n\n{result_text}\n\n{scoreboard_text}",
+            reply_markup=inline_keyboard(owner_keyboard_rows)
+        )
+
+
+# ═══════════════════════════════════════════
+# Penalty System — Functions
+# ═══════════════════════════════════════════
+
+def show_penalty_player_list(round_id, admin_id, chat_id):
+    """لیست شماره‌دار بازیکنان رو به مدیر نشون میده برای انتخاب جهت جریمه"""
+    with db() as conn:
+        round_players = conn.execute("""
+            SELECT rp.player_id, p.display_name, rp.score, rp.penalty
+            FROM round_players rp
+            JOIN players p ON p.id = rp.player_id
+            WHERE rp.round_id = ?
+            ORDER BY rp.id ASC
+        """, (round_id,)).fetchall()
+
+    if not round_players:
+        send_message(chat_id, "⚠️ هیچ بازیکنی برای جریمه یافت نشد.")
+        return
+
+    # فقط کسایی که هنوز جریمه نَشدن و امتیاز دارن
+    eligible = [rp for rp in round_players if not rp["penalty"] and rp["score"] > 0]
+
+    if not eligible:
+        send_message(chat_id, "✅ همه بازیکن‌های امتیازدار قبلاً جریمه شدن یا امتیازی برای صفر کردن ندارن.")
+        return
+
+    # ساخت mapping: عدد → player_id
+    mapping = {}
+    lines = ["🚫 **ثبت جریمه**\n", "کدوم بازیکن رو می‌خوای جریمه کنی؟ عددش رو بفرست:\n"]
+
+    for i, rp in enumerate(eligible, 1):
+        mapping[i] = rp["player_id"]
+        lines.append(f"{i}️⃣ {rp['display_name']} — {rp['score']} امتیاز این دور")
+
+    lines.append("\n❌ برای لغو، کلمه «انصراف» رو بفرست.")
+
+    # ذخیره mapping در مموری
+    _penalty_mappings[round_id] = mapping
+
+    # تنظیم state برای مدیر
+    set_user_state(admin_id, f"penalty_waiting:{round_id}")
+
+    send_message(chat_id, "\n".join(lines))
+
+
+def apply_penalty(round_id, penalized_player_id):
+    """
+    امتیاز یک بازیکن در این دور رو صفر می‌کنه.
+    مقدار round_score ذخیره‌شده در round_players رو از cumulative score کم می‌کنه.
+    """
+    with db() as conn:
+        # گرفتن امتیاز این دور بازیکن
+        rp = conn.execute("""
+            SELECT rp.score, rp.penalty, p.display_name, p.id AS player_id
+            FROM round_players rp
+            JOIN players p ON p.id = rp.player_id
+            WHERE rp.round_id = ? AND rp.player_id = ?
+        """, (round_id, penalized_player_id)).fetchone()
+
+        if not rp:
+            return None
+
+        if rp["penalty"]:
+            return None  # قبلاً جریمه شده
+
+        round_score = rp["score"]
+
+        # صفر کردن امتیاز این دور در round_players
+        conn.execute("""
+            UPDATE round_players
+            SET penalty = 1, score = 0
+            WHERE round_id = ? AND player_id = ?
+        """, (round_id, penalized_player_id))
+
+        # کم کردن از امتیاز کلی بازیکن
+        if round_score > 0:
+            conn.execute("""
+                UPDATE players
+                SET score = MAX(0, score - ?)
+                WHERE id = ?
+            """, (round_score, penalized_player_id))
+
+        conn.commit()
+
+        print(f"🚫 PENALTY applied: {rp['display_name']} in round {round_id} "
+              f"(-{round_score} points)")
+
+        return rp["display_name"]
+
+
+def recalculate_and_broadcast(round_id):
+    """
+    بعد از جریمه، جدول امتیازات رو دوباره می‌سازه و برای همه (بازیکن‌ها + مدیر) می‌فرسته.
+    """
+    round_row = get_round(round_id)
+    if not round_row:
+        return
+
+    game = get_game_by_id(round_row["game_id"])
+    players = get_players(game["id"])
+    admin_id = int(game["owner_user_id"])
+
+    with db() as conn:
+        scoreboard = conn.execute("""
+            SELECT *
+            FROM players
+            WHERE game_id = ?
+            ORDER BY score DESC, display_name ASC
+        """, (game["id"],)).fetchall()
+
+        # گرفتن اطلاعات جریمه‌شده‌ها برای نمایش
+        penalized = conn.execute("""
+            SELECT p.display_name
+            FROM round_players rp
+            JOIN players p ON p.id = rp.player_id
+            WHERE rp.round_id = ? AND rp.penalty = 1
+        """, (round_id,)).fetchall()
+
+    penalized_names = [p["display_name"] for p in penalized]
+
+    # ساخت متن جدول امتیازات
+    score_lines = ["📊 **جدول امتیازها (بروز شده):**\n"]
+    for index, p in enumerate(scoreboard, start=1):
+        score_lines.append(f"{index}. {p['display_name']} — {p['score']} امتیاز")
+
+    if penalized_names:
+        score_lines.append(
+            f"\n🚫 جریمه‌شده‌ها: {', '.join(penalized_names)}"
+        )
+
+    scoreboard_text = "\n".join(score_lines)
+
+    # ── ارسال به بازیکن‌ها ──
+    admin_is_player = any(int(p["user_id"]) == admin_id for p in players)
+
+    for p in players:
+        if int(p["user_id"]) == admin_id:
+            # مدیر-بازیکن: دکمه جریمه هم داره
+            keyboard = inline_keyboard([
+                [button("🚀 شروع دور جدید", f"start_round:{game['code']}")],
+                [button("🚫 ثبت جریمه", f"penalty_start:{round_id}")]
+            ])
+        else:
+            keyboard = inline_keyboard([
+                [button("🚀 شروع دور جدید", f"start_round:{game['code']}")]
+            ])
+
+        send_message(p["chat_id"], scoreboard_text, reply_markup=keyboard)
+
+    # ── ارسال به مدیر (اگر بازیکن نیست) ──
+    if not admin_is_player:
+        admin_keyboard = inline_keyboard([
+            [button("🚀 شروع دور جدید", f"start_round:{game['code']}")],
+            [button("🚫 ثبت جریمه", f"penalty_start:{round_id}")]
         ])
-    )
+        send_message(
+            game["owner_chat_id"],
+            f"🔍 **پنل نظارت — {scoreboard_text}**",
+            reply_markup=admin_keyboard
+        )
 
 
 # =========================
@@ -1241,7 +1463,13 @@ def handle_callback(callback):
         return
 
     if action == "start_round":
+        # پاک کردن penalty mappings قدیمی
+        _penalty_mappings.clear()
         start_new_round(user_id, chat_id, value)
+
+    elif action == "penalty_start":
+        round_id = int(value)
+        show_penalty_player_list(round_id, user_id, chat_id)
 
     elif action == "end_answers":
         request_end_answers(user_id, chat_id, int(value))
@@ -1314,7 +1542,7 @@ def handle_message(message):
 
         send_message(
             chat_id,
-            "سلام! من دستیار بازی گروهی شیاد هستم.\n\n"
+            "سلام! من ربات بازی جواب‌های گمراه‌کننده‌ام.\n\n"
             "اگر مدیر بازی هستی، با دستور /newgame یه بازی جدید بساز.\n"
             "اگر بازیکنی، باید با لینک عضویت مدیر وارد بشی."
         )
@@ -1334,6 +1562,60 @@ def handle_message(message):
         return
 
     state = get_user_state(user_id)
+
+    # ═══ STATE: در حال انتخاب بازیکن برای جریمه ═══
+    if state and state["state"].startswith("penalty_waiting:"):
+        round_id = int(state["state"].split(":")[1])
+
+        # لغو
+        if text == "انصراف" or text == "/cancel":
+            clear_user_state(user_id)
+            send_message(chat_id, "❌ جریمه لغو شد.")
+            return
+
+        # اعتبارسنجی: باید عدد باشه
+        if not text.isdigit():
+            send_message(chat_id, "⚠️ لطفاً عدد بازیکن رو بفرست (مثلاً 2).")
+            return
+
+        player_number = int(text)
+        mapping = _penalty_mappings.get(round_id, {})
+
+        if player_number not in mapping:
+            send_message(chat_id, f"⚠️ عدد {player_number} معتبر نیست. دوباره سعی کن.")
+            return
+
+        penalized_player_id = mapping[player_number]
+
+        # اعمال جریمه
+        player_name = apply_penalty(round_id, penalized_player_id)
+
+        if player_name:
+            send_message(
+                chat_id,
+                f"🚫 **{player_name}** جریمه شد!\n"
+                f"امتیاز این دورش صفر شد و از مجموع امتیازاتش کم شد."
+            )
+            # اطلاع‌رسانی به خود بازیکن جریمه‌شده
+            penalized_player = get_player_by_id(penalized_player_id)
+            if penalized_player:
+                send_message(
+                    penalized_player["chat_id"],
+                    "🚫 **شما توسط مدیر جریمه شدید!**\n\n"
+                    "امتیاز شما در این دور صفر شد.\n"
+                    "احتمالاً جواب شما خیلی شبیه جواب درست بوده.\n"
+                    "دفعه بعد حتی اگه جواب رو می‌دونی، یه جواب گمراه‌کننده بده."
+                )
+        else:
+            send_message(chat_id, "⚠️ این بازیکن قبلاً جریمه شده یا پیدا نشد.")
+
+        # پاک کردن state
+        clear_user_state(user_id)
+
+        # محاسبه مجدد و ارسال نتایج جدید به همه
+        recalculate_and_broadcast(round_id)
+
+        return
 
     if state and state["state"] == "awaiting_name":
         game_code = state["data"].get("game_code")
