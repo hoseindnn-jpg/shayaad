@@ -559,7 +559,7 @@ def start_new_round(user_id, chat_id, game_code):
     game = get_game_by_code(game_code)
 
     if not game:
-        send_message(chat_id, "بازی پیدا نشد.")
+        send_message(chat_id, "بازی پیدا نشد برای شروع بازی جدید /start رو ارسال کنید.")
         return
 
     if not is_owner(game, user_id):
