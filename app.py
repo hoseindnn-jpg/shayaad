@@ -59,7 +59,7 @@ def db():
 
 # ==================== TELEGRAM API ====================
 def tg_request(method, data=None):
-    url = f"{BASE_URL}/{method}"
+    url = f"{TELEGRAM_API}/{method}"   
     try:
         r = requests.post(url, json=data, timeout=10)
         return r.json()
@@ -396,7 +396,7 @@ def start_new_round(chat_id, user_id, game_code):
             chat_id,
             "⚠️ اول باید دسته‌بندی سوالات رو مشخص کنی.",
             reply_markup=inline_keyboard([
-                [button("📚 اطلاعات عمومی", f"set_category:{game_code}:عمومی")],
+                [button("📚 اطلاعات عمومی", f"set_category:{game_code}:سخت")],
                 [button("🤪 سوالات عجیب و خنده‌دار", f"set_category:{game_code}:عجیب")]
             ])
         )
@@ -408,7 +408,7 @@ def start_new_round(chat_id, user_id, game_code):
             chat_id,
             f"❌ هیچ سوالی برای دسته «{category}» پیدا نشد. لطفاً دسته‌بندی رو عوض کن.",
             reply_markup=inline_keyboard([
-                [button("📚 اطلاعات عمومی", f"set_category:{game_code}:عمومی")],
+                [button("📚 اطلاعات عمومی", f"set_category:{game_code}:سخت")],
                 [button("🤪 سوالات عجیب و خنده‌دار", f"set_category:{game_code}:عجیب")]
             ])
         )
@@ -1103,7 +1103,7 @@ def handle_callback(callback):
             f"دسته فعلی: {current}\n\n"
             "دسته جدید رو انتخاب کن:",
             reply_markup=inline_keyboard([
-                [button("📚 اطلاعات عمومی", f"set_category:{value}:عمومی")],
+                [button("📚 اطلاعات عمومی", f"set_category:{value}:سخت")],
                 [button("🤪 سوالات عجیب و خنده‌دار", f"set_category:{value}:عجیب")]
             ])
         )
@@ -1273,7 +1273,7 @@ def webhook():
 
 @app.route("/set-webhook")
 def set_webhook():
-    url = f"{BASE_URL}/setWebhook"
+    url = f"{TELEGRAM_API}/setWebhook"
     webhook_url = request.args.get("url", "")
     if not webhook_url:
         return "Please provide webhook URL: /set-webhook?url=https://yourdomain.com/telegram/webhook"
@@ -1282,7 +1282,7 @@ def set_webhook():
 
 @app.route("/delete-webhook")
 def delete_webhook():
-    url = f"{BASE_URL}/deleteWebhook"
+    url = f"{TELEGRAM_API}/setWebhook"
     r = requests.post(url)
     return jsonify(r.json())
 
