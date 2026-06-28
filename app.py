@@ -304,7 +304,7 @@ def create_game(chat_id, user_id):
         "🎯 **دسته‌بندی سوالات رو انتخاب کن:**\n\n"
         "بعداً هم می‌تونی از طریق دکمه «تغییر دسته‌بندی» عوضش کنی.",
         reply_markup=inline_keyboard([
-            [button("📚 اطلاعات عمومی", f"set_category:{code}:عمومی")],
+            [button("📚 اطلاعات عمومی", f"set_category:{code}:سخت")],
             [button("🤪 سوالات عجیب و خنده‌دار", f"set_category:{code}:عجیب")]
         ])
     )
