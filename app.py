@@ -68,15 +68,20 @@ def tg_request(method, data=None):
 
 
 def send_message(chat_id, text, reply_markup=None, parse_mode="HTML"):
-    result = tg_request("sendMessage", {
+    params = {
         "chat_id": chat_id,
         "text": text,
-        "reply_markup": reply_markup,
         "parse_mode": parse_mode
-    })
+    }
+    
+    if reply_markup:
+        params["reply_markup"] = json.dumps(reply_markup)  # تبدیل به JSON
+    
+    result = tg_request("sendMessage", params)
     if not result.get("ok"):
         print(f"❌ ارسال پیام به {chat_id} ناموفق: {result.get('description', 'خطای ناشناخته')}")
     return result
+
 
 
 def answer_callback(callback_id, text=None):
