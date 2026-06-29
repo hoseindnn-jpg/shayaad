@@ -20,8 +20,6 @@ TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN is not set")
 
-
-
 # ==================== HELPERS ====================
 def now():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -66,7 +64,6 @@ def tg_request(method, data=None):
         print(f"Telegram API error: {e}")
         return {"ok": False, "description": str(e)}  
 
-
 def send_message(chat_id, text, reply_markup=None, parse_mode="HTML"):
     params = {
         "chat_id": chat_id,
@@ -75,14 +72,12 @@ def send_message(chat_id, text, reply_markup=None, parse_mode="HTML"):
     }
     
     if reply_markup:
-        params["reply_markup"] = json.dumps(reply_markup)  # تبدیل به JSON
+        params["reply_markup"] = json.dumps(reply_markup)
     
     result = tg_request("sendMessage", params)
     if not result.get("ok"):
         print(f"❌ ارسال پیام به {chat_id} ناموفق: {result.get('description', 'خطای ناشناخته')}")
     return result
-
-
 
 def answer_callback(callback_id, text=None):
     return tg_request("answerCallbackQuery", {
@@ -99,6 +94,8 @@ def button(text, callback_data):
 # ==================== DATABASE INIT ====================
 def init_db():
     conn = db()
+    
+    # جدول games
     conn.execute("""
         CREATE TABLE IF NOT EXISTS games (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -109,6 +106,8 @@ def init_db():
             category TEXT DEFAULT NULL
         )
     """)
+    
+    # جدول players
     conn.execute("""
         CREATE TABLE IF NOT EXISTS players (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -120,6 +119,8 @@ def init_db():
             FOREIGN KEY (game_id) REFERENCES games(id)
         )
     """)
+    
+    # جدول user_states
     conn.execute("""
         CREATE TABLE IF NOT EXISTS user_states (
             user_id INTEGER PRIMARY KEY,
@@ -128,6 +129,8 @@ def init_db():
             updated_at TEXT NOT NULL
         )
     """)
+    
+    # جدول rounds
     conn.execute("""
         CREATE TABLE IF NOT EXISTS rounds (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -140,6 +143,8 @@ def init_db():
             FOREIGN KEY (game_id) REFERENCES games(id)
         )
     """)
+    
+    # جدول round_players
     conn.execute("""
         CREATE TABLE IF NOT EXISTS round_players (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -153,6 +158,8 @@ def init_db():
             FOREIGN KEY (player_id) REFERENCES players(id)
         )
     """)
+    
+    # جدول answers
     conn.execute("""
         CREATE TABLE IF NOT EXISTS answers (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -163,6 +170,8 @@ def init_db():
             FOREIGN KEY (player_id) REFERENCES players(id)
         )
     """)
+    
+    # جدول options
     conn.execute("""
         CREATE TABLE IF NOT EXISTS options (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -175,6 +184,8 @@ def init_db():
             FOREIGN KEY (player_id) REFERENCES players(id)
         )
     """)
+    
+    # جدول votes
     conn.execute("""
         CREATE TABLE IF NOT EXISTS votes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -186,31 +197,24 @@ def init_db():
             FOREIGN KEY (option_id) REFERENCES options(id)
         )
     """)
-
+    
     # ===== MIGRATIONS =====
-    # normalized_name
-    try:
-        conn.execute("ALTER TABLE players ADD COLUMN normalized_name TEXT")
-    except:
-        pass
-    # score in round_players
-    try:
-        conn.execute("ALTER TABLE round_players ADD COLUMN score INTEGER DEFAULT 0")
-    except:
-        pass
-    # penalty in round_players
-    try:
-        conn.execute("ALTER TABLE round_players ADD COLUMN penalty INTEGER DEFAULT 0")
-    except:
-        pass
-    # category in games
-    try:
-        conn.execute("ALTER TABLE games ADD COLUMN category TEXT DEFAULT NULL")
-    except:
-        pass
-
+    migrations = [
+        "ALTER TABLE players ADD COLUMN normalized_name TEXT",
+        "ALTER TABLE round_players ADD COLUMN score INTEGER DEFAULT 0",
+        "ALTER TABLE round_players ADD COLUMN penalty INTEGER DEFAULT 0",
+        "ALTER TABLE games ADD COLUMN category TEXT DEFAULT NULL"
+    ]
+    
+    for migration in migrations:
+        try:
+            conn.execute(migration)
+        except sqlite3.OperationalError:
+            pass  # ستون از قبل وجود دارد
+    
     conn.commit()
     conn.close()
+    print("✅ Database initialized successfully")
 
 # ==================== PENALTY MAPPINGS ====================
 _penalty_mappings = {}
@@ -289,6 +293,31 @@ def is_owner(game, user_id):
 def join_link(game_code):
     return f"https://t.me/{BOT_USERNAME}?start={game_code}"
 
+# ==================== MENU FUNCTIONS ====================
+def send_main_menu(chat_id, user_id=None):
+    """ارسال منوی اصلی با دکمه‌ها"""
+    keyboard = inline_keyboard([
+        [button("🎮 ساخت بازی جدید", "new_game")],
+        [button("📖 راهنما", "show_help")]
+    ])
+    
+    send_message(
+        chat_id,
+        "🎮 **به بازی گروهی شیاد خوش اومدی!**\n\n"
+        "برای شروع یکی از گزینه‌ها رو انتخاب کن:",
+        reply_markup=keyboard
+    )
+
+def send_back_to_menu_button(chat_id, text):
+    """ارسال پیام با دکمه بازگشت به منو"""
+    send_message(
+        chat_id,
+        text,
+        reply_markup=inline_keyboard([
+            [button("🏠 بازگشت به منو", "back_to_menu")]
+        ])
+    )
+
 # ==================== GAME CREATION ====================
 def create_game(chat_id, user_id):
     code = generate_code()
@@ -313,7 +342,7 @@ def create_game(chat_id, user_id):
         ])
     )
 
-    # ── درخواست انتخاب دسته‌بندی ──
+    # درخواست انتخاب دسته‌بندی
     send_message(
         chat_id,
         "🎯 **دسته‌بندی سوالات رو انتخاب کن:**\n\n"
@@ -328,7 +357,7 @@ def create_game(chat_id, user_id):
 def join_game_start(chat_id, user_id, game_code):
     game = get_game_by_code(game_code)
     if not game:
-        send_message(chat_id, "❌ بازی پیدا نشد. کد رو دوباره چک کن.")
+        send_back_to_menu_button(chat_id, "❌ بازی پیدا نشد. کد رو دوباره چک کن.")
         return
 
     game_id = game["id"]
@@ -343,7 +372,7 @@ def join_game_start(chat_id, user_id, game_code):
 def save_player_name(chat_id, user_id, name, game_code):
     game = get_game_by_code(game_code)
     if not game:
-        send_message(chat_id, "❌ بازی پیدا نشد.")
+        send_back_to_menu_button(chat_id, "❌ بازی پیدا نشد.")
         clear_user_state(user_id)
         return
 
@@ -370,7 +399,7 @@ def save_player_name(chat_id, user_id, name, game_code):
     conn.close()
 
     clear_user_state(user_id)
-    send_message(chat_id, f"✅ با نام **{name}** عضو بازی شدی! 🎉\nمنتظر شروع بازی باش.")
+    send_back_to_menu_button(chat_id, f"✅ با نام **{name}** عضو بازی شدی! 🎉\nمنتظر شروع بازی باش.")
 
     # اطلاع به مدیر
     owner_msg = f"👤 **{name}** به بازی اضافه شد."
@@ -380,7 +409,7 @@ def save_player_name(chat_id, user_id, name, game_code):
 def start_new_round(chat_id, user_id, game_code):
     game = get_game_by_code(game_code)
     if not game:
-        send_message(chat_id, "❌ بازی پیدا نشد.")
+        send_back_to_menu_button(chat_id, "❌ بازی پیدا نشد.")
         return
 
     if not is_owner(game, user_id):
@@ -398,7 +427,7 @@ def start_new_round(chat_id, user_id, game_code):
         send_message(chat_id, "⚠️ حداقل ۳ بازیکن لازمه. هنوز به اندازه کافی عضو نشدن.")
         return
 
-    # ── بررسی دسته‌بندی ──
+    # بررسی دسته‌بندی
     category = game.get("category")
     if not category:
         send_message(
@@ -1004,7 +1033,6 @@ def apply_penalty(round_id, penalized_player_id):
     conn.close()
     return score_to_deduct
 
-
 def recalculate_and_broadcast(round_id):
     round_data = get_round(round_id)
     if not round_data:
@@ -1054,6 +1082,7 @@ def recalculate_and_broadcast(round_id):
             pass
 
     # اگر مدیر بازیکن نیست
+        # اگر مدیر بازیکن نیست
     if not any(p["user_id"] == game["owner_id"] for p in players):
         send_message(
             game["owner_chat_id"],
@@ -1065,248 +1094,290 @@ def recalculate_and_broadcast(round_id):
             ])
         )
 
-# ==================== CALLBACK HANDLER ====================
-def handle_callback(callback):
-    callback_id = callback["id"]
-    data = callback.get("data", "")
-    chat_id = callback["message"]["chat"]["id"]
-    user_id = callback["from"]["id"]
-
-    answer_callback(callback_id)
-
-    if not data:
-        return
-
-    parts = data.split(":", 1)
+# ==================== HANDLE CALLBACKS ====================
+def handle_callback(callback_data, chat_id, user_id, callback_id=None):
+    """مدیریت کلیک روی دکمه‌های اینلاین"""
+    print(f"Callback: {callback_data}")
+    
+    parts = callback_data.split(":")
     action = parts[0]
-    value = parts[1] if len(parts) > 1 else ""
-
-    if action == "start_round":
-        _penalty_mappings.clear()
-        start_new_round(chat_id, user_id, value)
-
-    elif action == "penalty_start":
-        show_penalty_player_list(int(value), user_id, chat_id)
-
-    elif action == "end_answers":
-        request_end_answers(int(value), chat_id, user_id)
-
-    elif action == "force_end_answers":
-        close_answers_and_prepare_options(int(value))
-
-    elif action == "start_voting":
-        start_voting(int(value), chat_id, user_id)
-
-    elif action == "end_voting":
-        request_end_voting(int(value), chat_id, user_id)
-
-    elif action == "force_end_voting":
-        finalize_round(int(value))
-
-    elif action == "cancel_action":
-        send_message(chat_id, "🔙 عملیات لغو شد.")
-
-    elif action == "change_category":
-        game = get_game_by_code(value)
-        if not game:
-            send_message(chat_id, "❌ بازی پیدا نشد.")
-            return
-        if not is_owner(game, user_id):
-            send_message(chat_id, "❌ فقط مدیر بازی می‌تونه دسته‌بندی رو عوض کنه.")
-            return
-
-        current = game.get("category") or "هیچکدوم"
+    
+    if action == "new_game":
+        create_game(chat_id, user_id)
+        if callback_id:
+            answer_callback(callback_id, "🎮 بازی جدید ساخته شد!")
+        
+    elif action == "show_help":
         send_message(
             chat_id,
-            f"🔄 **تغییر دسته‌بندی**\n\n"
-            f"دسته فعلی: {current}\n\n"
-            "دسته جدید رو انتخاب کن:",
+            "📖 **راهنمای بازی شیاد:**\n\n"
+            "🎮 **نحوه بازی:**\n"
+            "1️⃣ مدیر بازی رو می‌سازه و لینک دعوت رو می‌فرسته\n"
+            "2️⃣ بازیکنان با کلیک روی لینک و وارد کردن اسم عضو میشن\n"
+            "3️⃣ مدیر دور جدید رو شروع می‌کنه و سوال نمایش داده میشه\n"
+            "4️⃣ بازیکنان باید جواب **اشتباه** اما باورپذیر بدن\n"
+            "5️⃣ مدیر جواب‌ها رو می‌بینه و رأی‌گیری رو شروع می‌کنه\n"
+            "6️⃣ بازیکنان به جوابی که فکر می‌کنن درسته رأی میدن\n"
+            "7️⃣ امتیازات محاسبه و نتایج نمایش داده میشه\n\n"
+            "📊 **امتیازدهی:**\n"
+            "✅ هر رأی درست: +1 امتیاز\n"
+            "🎭 هر رأی به جواب اشتباه: +1 امتیاز برای نویسنده\n"
+            "🚫 مدیر می‌تونه به بازیکن پرامتیاز جریمه بده\n\n"
+            "برای شروع روی «ساخت بازی جدید» کلیک کن!",
             reply_markup=inline_keyboard([
-                [button("📚 اطلاعات عمومی", f"set_category:{value}:سخت")],
-                [button("🤪 سوالات عجیب و خنده‌دار", f"set_category:{value}:عجیب")]
+                [button("🎮 ساخت بازی جدید", "new_game")],
+                [button("🏠 بازگشت به منو", "back_to_menu")]
             ])
         )
-
+        if callback_id:
+            answer_callback(callback_id)
+        
+    elif action == "back_to_menu":
+        clear_user_state(user_id)
+        send_main_menu(chat_id, user_id)
+        if callback_id:
+            answer_callback(callback_id)
+        
+    elif action == "start_round":
+        if len(parts) >= 2:
+            game_code = parts[1]
+            start_new_round(chat_id, user_id, game_code)
+        if callback_id:
+            answer_callback(callback_id)
+        
     elif action == "set_category":
-        # value = game_code:category
-        sub_parts = value.split(":", 1)
-        game_code = sub_parts[0]
-        new_category = sub_parts[1] if len(sub_parts) > 1 else None
-
-        if not new_category:
-            send_message(chat_id, "⚠️ دسته‌بندی نامعتبره.")
-            return
-
-        game = get_game_by_code(game_code)
-        if not game:
-            send_message(chat_id, "❌ بازی پیدا نشد.")
-            return
-
-        if not is_owner(game, user_id):
-            send_message(chat_id, "❌ فقط مدیر بازی می‌تونه دسته‌بندی رو تغییر بده.")
-            return
-
-        conn = db()
-        conn.execute("UPDATE games SET category = ? WHERE id = ?", (new_category, game["id"]))
-        conn.commit()
-        conn.close()
-
-        send_message(
-            chat_id,
-            f"✅ دسته‌بندی با موفقیت به «{new_category}» تغییر کرد.\n\n"
-            "حالا می‌تونی دور جدید رو شروع کنی.",
-            reply_markup=inline_keyboard([
-                [button("🚀 شروع دور جدید", f"start_round:{game_code}")]
-            ])
-        )
-
-# ==================== MESSAGE HANDLER ====================
-def handle_message(message):
-    chat_id = message["chat"]["id"]
-    user_id = message["from"]["id"]
-    text = message.get("text", "")
-
-    if not text:
-        return
-
-    # دستورات عمومی
-    if text.startswith("/start"):
-        parts = text.split(" ", 1)
-        if len(parts) > 1:
-            game_code = parts[1].strip()
-            join_game_start(chat_id, user_id, game_code)
-        else:
+        if len(parts) >= 3:
+            game_code = parts[1]
+            category = parts[2]
+            conn = db()
+            conn.execute("UPDATE games SET category = ? WHERE code = ?", (category, game_code))
+            conn.commit()
+            conn.close()
             send_message(
                 chat_id,
-                "🎮 **به بازی گروهی شیاد خوش اومدی!**\n\n"
-               "برای شروع:\n"
-                "• `/newgame` — ساخت بازی جدید\n"
-                "• `/help` — راهنما",
-                parse_mode="Markdown"
+                f"✅ دسته‌بندی به «{category}» تغییر کرد.",
+                reply_markup=inline_keyboard([
+                    [button("🚀 شروع دور جدید", f"start_round:{game_code}")]
+                ])
             )
+        if callback_id:
+            answer_callback(callback_id)
+        
+    elif action == "change_category":
+        if len(parts) >= 2:
+            game_code = parts[1]
+            send_message(
+                chat_id,
+                "🎯 **دسته‌بندی جدید رو انتخاب کن:**",
+                reply_markup=inline_keyboard([
+                    [button("📚 اطلاعات عمومی", f"set_category:{game_code}:سخت")],
+                    [button("🤪 سوالات عجیب و خنده‌دار", f"set_category:{game_code}:عجیب")]
+                ])
+            )
+        if callback_id:
+            answer_callback(callback_id)
+        
+    elif action == "end_answers":
+        if len(parts) >= 2:
+            round_id = int(parts[1])
+            request_end_answers(round_id, chat_id, user_id)
+        if callback_id:
+            answer_callback(callback_id)
+        
+    elif action == "force_end_answers":
+        if len(parts) >= 2:
+            round_id = int(parts[1])
+            close_answers_and_prepare_options(round_id)
+        if callback_id:
+            answer_callback(callback_id, "✅ ارسال جواب‌ها بسته شد.")
+        
+    elif action == "start_voting":
+        if len(parts) >= 2:
+            round_id = int(parts[1])
+            start_voting(round_id, chat_id, user_id)
+        if callback_id:
+            answer_callback(callback_id)
+        
+    elif action == "end_voting":
+        if len(parts) >= 2:
+            round_id = int(parts[1])
+            request_end_voting(round_id, chat_id, user_id)
+        if callback_id:
+            answer_callback(callback_id)
+        
+    elif action == "force_end_voting":
+        if len(parts) >= 2:
+            round_id = int(parts[1])
+            finalize_round(round_id)
+        if callback_id:
+            answer_callback(callback_id, "✅ رأی‌گیری بسته و نتایج محاسبه شد.")
+        
+    elif action == "cancel_action":
+        if callback_id:
+            answer_callback(callback_id, "❌ عملیات لغو شد.")
+        
+    elif action == "penalty_start":
+        if len(parts) >= 2:
+            round_id = int(parts[1])
+            show_penalty_player_list(round_id, user_id, chat_id)
+        if callback_id:
+            answer_callback(callback_id)
+        
+    else:
+        if callback_id:
+            answer_callback(callback_id, "⚠️ دستور نامعتبر")
+
+# ==================== HANDLE MESSAGES ====================
+def handle_message(chat_id, user_id, text, username=None, first_name=None):
+    """مدیریت پیام‌های متنی"""
+    text = text.strip()
+    
+    if text.startswith("/start"):
+        parts = text.split()
+        if len(parts) > 1:
+            game_code = parts[1]
+            join_game_start(chat_id, user_id, game_code)
+        else:
+            send_main_menu(chat_id, user_id)
         return
-
-    if text == "/newgame":
-        create_game(chat_id, user_id)
+    
+    elif text in ["/cancel", "انصراف", "لغو"]:
+        clear_user_state(user_id)
+        send_back_to_menu_button(chat_id, "❌ عملیات کنونی لغو شد.")
         return
-
-    if text == "/help":
-        send_message(
-            chat_id,
-            "📖 **راهنما:**\n\n"
-            "۱. `/newgame` — بازی جدید بساز.\n"
-            "۲. لینک دعوت رو برای دوستات بفرست.\n"
-            "۳. بعد از عضویت ۳+ نفر، «شروع دور جدید» رو بزن.\n"
-            "۴. دسته‌بندی رو انتخاب کن.\n"
-            "۵. سوال ارسال می‌شه و همه جواب می‌دن.\n"
-            "۶. رأی‌گیری می‌شه و امتیازها محاسبه می‌شن.\n"
-            "۷. مدیر می‌تونه جریمه کنه یا دسته رو عوض کنه."
-        )
+    
+    elif text in ["/help", "راهنما"]:
+        handle_callback("show_help", chat_id, user_id)
         return
-
-    # بررسی state کاربر
-    state = get_user_state(user_id)
-    if state:
-        state_value = state["state"]
-
-        # حالت انتظار برای جریمه
-        if state_value.startswith("penalty_waiting:"):
-            round_id = int(state_value.split(":")[1])
-
-            if text == "انصراف" or text == "/cancel":
-                clear_user_state(user_id)
-                send_message(chat_id, "🔙 جریمه لغو شد.")
-                return
-
-            if not text.isdigit():
-                send_message(chat_id, "⚠️ لطفاً عدد گزینه مورد نظر رو بفرست، یا «انصراف» بزن.")
-                return
-
-            num = int(text)
-            mapping = _penalty_mappings.get(round_id, {})
-            if num not in mapping:
-                send_message(chat_id, "⚠️ این عدد توی لیست نیست. دوباره بفرست.")
-                return
-
-            penalized_player_id = mapping[num]
-            deducted = apply_penalty(round_id, penalized_player_id)
-
-            if deducted is None:
-                send_message(chat_id, "⚠️ این بازیکن قبلاً جریمه شده یا پیدا نشد.")
-                clear_user_state(user_id)
-                return
-
-            # اطلاع به بازیکن جریمه‌شده
-            penalized_player = get_player_by_id(penalized_player_id)
-            if penalized_player:
-                try:
-                    send_message(
-                        penalized_player["user_id"],
-                        f"🚫 **جریمه شدی!**\n\n"
-                        f"{deducted} امتیاز ازت کم شد."
-                    )
-                except:
-                    pass
-
-            clear_user_state(user_id)
-            send_message(chat_id, f"✅ {penalized_player['name']} جریمه شد و {deducted} امتیاز ازش کم شد.")
-
-            recalculate_and_broadcast(round_id)
-            return
-
-        # حالت انتظار برای نام
-        if state_value.startswith("awaiting_name:"):
-            game_code = state_value.split(":")[1]
+    
+    elif text == "/menu":
+        send_main_menu(chat_id, user_id)
+        return
+    
+    # بررسی وضعیت کاربر
+    state_row = get_user_state(user_id)
+    if state_row:
+        state = state_row["state"]
+        
+        if state.startswith("awaiting_name:"):
+            game_code = state.split(":")[1]
             save_player_name(chat_id, user_id, text, game_code)
             return
-
-    # بررسی پاسخ به سوال
+        
+        elif state.startswith("penalty_waiting:"):
+            round_id = int(state.split(":")[1])
+            if text.isdigit():
+                number = int(text)
+                mapping = _penalty_mappings.get(round_id, {})
+                if number in mapping:
+                    player_id = mapping[number]
+                    deducted = apply_penalty(round_id, player_id)
+                    if deducted is not None:
+                        player = get_player_by_id(player_id)
+                        send_message(
+                            chat_id,
+                            f"🚫 **جریمه اعمال شد!**\n\n"
+                            f"👤 بازیکن: {player['name']}\n"
+                            f"➖ امتیاز کسر شده: {deducted}\n\n"
+                            "🔄 جدول امتیازات در حال به‌روزرسانی..."
+                        )
+                        recalculate_and_broadcast(round_id)
+                    else:
+                        send_message(chat_id, "⚠️ این بازیکن قبلاً جریمه شده!")
+                    _penalty_mappings.pop(round_id, None)
+                    clear_user_state(user_id)
+                else:
+                    send_message(chat_id, "⚠️ شماره نامعتبر. دوباره انتخاب کن:")
+            else:
+                send_message(chat_id, "⚠️ لطفاً فقط عدد وارد کن:")
+            return
+    
+    # بررسی اگر کاربر در حال پاسخ دادن به سوال است
     if handle_answer_message(chat_id, user_id, text):
         return
-
-    # بررسی رأی
+    
+    # بررسی اگر کاربر در حال رأی دادن است
     if handle_vote_message(chat_id, user_id, text):
         return
+    
+    # اگر هیچ‌کدام نبود، منوی اصلی
+    send_main_menu(chat_id, user_id)
 
-# ==================== FLASK ROUTES ====================
-@app.route("/")
-def index():
-    return "Bot is running!"
-
+# ==================== WEBHOOK HANDLERS ====================
 @app.route("/telegram/webhook", methods=["POST"])
-def webhook():
+def telegram_webhook():
     data = request.get_json()
-    if not data:
-        return "OK"
-
+    print(f"📥 Received update: {json.dumps(data, indent=2, ensure_ascii=False)}")
+    
     try:
-        if "callback_query" in data:
-            handle_callback(data["callback_query"])
-        elif "message" in data:
-            handle_message(data["message"])
+        if "message" in data:
+            msg = data["message"]
+            chat_id = msg["chat"]["id"]
+            user_id = msg["from"]["id"]
+            text = msg.get("text", "").strip()
+            username = msg["from"].get("username")
+            first_name = msg["from"].get("first_name", "")
+            
+            if text:
+                handle_message(chat_id, user_id, text, username, first_name)
+        
+        elif "callback_query" in data:
+            cb = data["callback_query"]
+            chat_id = cb["message"]["chat"]["id"]
+            user_id = cb["from"]["id"]
+            callback_data = cb["data"]
+            callback_id = cb["id"]
+            
+            handle_callback(callback_data, chat_id, user_id, callback_id)
+        
+        else:
+            print(f"⚠️ Unhandled update type: {data.keys()}")
+    
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"❌ Error processing update: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    return jsonify({"ok": True})
 
-    return "OK"
-
-@app.route("/set-webhook")
+@app.route("/set-webhook", methods=["GET"])
 def set_webhook():
-    url = f"{TELEGRAM_API}/setWebhook"
-    webhook_url = request.args.get("url", "")
+    webhook_url = os.environ.get("WEBHOOK_URL")
     if not webhook_url:
-        return "Please provide webhook URL: /set-webhook?url=https://yourdomain.com/telegram/webhook"
-    r = requests.post(url, json={"url": webhook_url})
-    return jsonify(r.json())
+        return "❌ WEBHOOK_URL not set", 400
+    
+    result = tg_request("setWebhook", {"url": webhook_url})
+    return jsonify(result)
 
-@app.route("/delete-webhook")
+@app.route("/delete-webhook", methods=["GET"])
 def delete_webhook():
-    url = f"{TELEGRAM_API}/deleteWebhook"
-    r = requests.post(url)
-    return jsonify(r.json())
+    result = tg_request("deleteWebhook")
+    return jsonify(result)
+
+@app.route("/init-db", methods=["GET"])
+def init_db_route():
+    init_db()
+    return "✅ Database initialized", 200
+
+@app.route("/", methods=["GET"])
+def index():
+    return "🤖 Bot is running!", 200
 
 # ==================== MAIN ====================
 if __name__ == "__main__":
+    # Initialize database
     init_db()
+    
+    # Set webhook on startup
+    webhook_url = os.environ.get("WEBHOOK_URL")
+    if webhook_url:
+        print(f"🔗 Setting webhook to: {webhook_url}")
+        result = tg_request("setWebhook", {"url": webhook_url})
+        print(f"📡 Webhook result: {json.dumps(result, indent=2, ensure_ascii=False)}")
+    else:
+        print("⚠️ WEBHOOK_URL not set — webhook won't be configured automatically")
+    
     port = int(os.environ.get("PORT", 5000))
+    print(f"🚀 Starting server on port {port}...")
     app.run(host="0.0.0.0", port=port)
 
