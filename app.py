@@ -1151,7 +1151,7 @@ def handle_message(message):
         return
 
     # دستورات عمومی
-    if tex.startswith("/start"):
+    if text.startswith("/start"):
         parts = text.split(" ", 1)
     if len(parts) > 1:
         game_code = parts[1].strip()
