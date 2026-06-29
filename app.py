@@ -923,7 +923,7 @@ def handle_callback(chat_id, user_id, callback_data, callback_id=None):
             show_penalty_player_list(round_id, user_id, chat_id)
         if callback_id:
             answer_callback(callback_id)
-        elif action == "set_category_first":
+    elif action == "set_category_first":
         # مشابه set_category ولی بعدش مستقیم start_new_round رو صدا می‌زنه
         if len(parts) >= 3:
             game_code = parts[1]
@@ -937,7 +937,7 @@ def handle_callback(chat_id, user_id, callback_data, callback_id=None):
             start_new_round(chat_id, user_id, game_code)
         if callback_id:
             answer_callback(callback_id)
-        elif action == "change_question":
+    elif action == "change_question":
         if len(parts) >= 2:
             round_id = int(parts[1])
             # گرفتن اطلاعات دور و بازی
@@ -972,7 +972,7 @@ def handle_callback(chat_id, user_id, callback_data, callback_id=None):
                     send_message(chat_id, "❌ سوال دیگه‌ای برای این دسته‌بندی پیدا نشد.")
         if callback_id:
             answer_callback(callback_id)
-        elif action == "send_question":
+    elif action == "send_question":
         if len(parts) >= 2:
             round_id = int(parts[1])
             conn = db()
