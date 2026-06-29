@@ -367,7 +367,6 @@ def start_new_round(chat_id, user_id, game_code):
         chat_id,
         f"📝 **پیش‌نمایش سوال:**\n\n"
         f"🎲 {q['question']}\n\n"
-        f"✅ جواب درست: ||{q['answer']}||\n\n"
         f"👥 این سوال برای {len(players)} بازیکن ارسال خواهد شد.",
         reply_markup=inline_keyboard([
             [button("🔄 تغییر سوال", f"change_question:{round_id}")],
@@ -855,7 +854,7 @@ def handle_callback(chat_id, user_id, callback_data, callback_id=None):
             conn.close()
             send_message(
                 chat_id,
-                f"✅ دسته‌بندی به «{category}» تغییر کرد.",
+                f"✅ دسته‌بندی تغییر کرد.",
                 reply_markup=inline_keyboard([
                     [button("🚀 شروع دور جدید", f"start_round:{game_code}")]
                 ])
@@ -932,7 +931,7 @@ def handle_callback(chat_id, user_id, callback_data, callback_id=None):
             conn.execute("UPDATE games SET category = ? WHERE code = ?", (category, game_code))
             conn.commit()
             conn.close()
-            send_message(chat_id, f"✅ دسته‌بندی به «{category}» تغییر کرد.")
+            send_message(chat_id, f"✅ دسته‌بندی تغییر کرد.")
             # حالا start_new_round رو دوباره صدا کن
             start_new_round(chat_id, user_id, game_code)
         if callback_id:
@@ -961,7 +960,6 @@ def handle_callback(chat_id, user_id, callback_data, callback_id=None):
                         chat_id,
                         f"🔄 **سوال جدید:**\n\n"
                         f"🎲 {new_q['question']}\n\n"
-                        f"✅ جواب درست: ||{new_q['answer']}||",
                         reply_markup=inline_keyboard([
                             [button("🔄 تغییر سوال", f"change_question:{round_id}")],
                             [button("📤 ارسال به بازیکنان", f"send_question:{round_id}")]
