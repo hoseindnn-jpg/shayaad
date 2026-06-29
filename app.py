@@ -334,7 +334,18 @@ def start_new_round(chat_id, user_id, game_code):
         send_message(chat_id, "⚠️ حداقل ۲ بازیکن لازم است.")
         return
 
-    category = game["category"] or "سخت"
+    category = game["category"]
+    if not category:
+        conn.close()
+        send_message(
+            chat_id,
+            "🎯 **قبل از شروع اولین دور، دسته‌بندی سوالات رو انتخاب کن:**",
+            reply_markup=inline_keyboard([
+                [button("📚 اطلاعات عمومی", f"set_category_first:{game_code}:سخت")],
+                [button("🤪 سوالات عجیب و خنده‌دار", f"set_category_first:{game_code}:عجیب")]
+            ])
+        )
+        return
     q = load_questions(category)
     if not q:
         conn.close()
@@ -351,25 +362,19 @@ def start_new_round(chat_id, user_id, game_code):
         conn.execute("INSERT INTO round_players (round_id, player_id) VALUES (?, ?)", (round_id, p["id"]))
     conn.commit()
     conn.close()
-
-    # ارسال سوال به همه بازیکنان
-    for p in players:
-        send_message(
-            p["user_id"],
-            f"🎲 **دور جدید - سوال:**\n{q['question']}\n\n"
-            "📝 **جواب اشتباه ولی باورپذیر خودت رو بفرست**\n"
-            "(توجه: جواب درست رو نفرست!)"
-        )
-
-    # پیام به مدیر
+    # 🔄 تغییر دوم: اول سوال رو فقط به مدیر نشون بده
     send_message(
         chat_id,
-        f"🚀 **دور جدید شروع شد!**\nسوال:\n{q['question']}\n\n"
-        f"منتظر جواب بازیکنان باشید.",
+        f"📝 **پیش‌نمایش سوال:**\n\n"
+        f"🎲 {q['question']}\n\n"
+        f"✅ جواب درست: ||{q['answer']}||\n\n"
+        f"👥 این سوال برای {len(players)} بازیکن ارسال خواهد شد.",
         reply_markup=inline_keyboard([
-            [button("🛑 پایان زمان جواب‌دهی", f"end_answers:{round_id}")]
+            [button("🔄 تغییر سوال", f"change_question:{round_id}")],
+            [button("📤 ارسال به بازیکنان", f"send_question:{round_id}")]
         ])
     )
+
 
 # ==================== HANDLE ANSWERS ====================
 _used_answers = set()  # فقط برای جلوگیری از تکرار در یک دور (reset شود؟ بهتر در دیتابیس)
@@ -918,6 +923,92 @@ def handle_callback(chat_id, user_id, callback_data, callback_id=None):
             show_penalty_player_list(round_id, user_id, chat_id)
         if callback_id:
             answer_callback(callback_id)
+        elif action == "set_category_first":
+        # مشابه set_category ولی بعدش مستقیم start_new_round رو صدا می‌زنه
+        if len(parts) >= 3:
+            game_code = parts[1]
+            category = parts[2]
+            conn = db()
+            conn.execute("UPDATE games SET category = ? WHERE code = ?", (category, game_code))
+            conn.commit()
+            conn.close()
+            send_message(chat_id, f"✅ دسته‌بندی به «{category}» تغییر کرد.")
+            # حالا start_new_round رو دوباره صدا کن
+            start_new_round(chat_id, user_id, game_code)
+        if callback_id:
+            answer_callback(callback_id)
+        elif action == "change_question":
+        if len(parts) >= 2:
+            round_id = int(parts[1])
+            # گرفتن اطلاعات دور و بازی
+            conn = db()
+            round_row = conn.execute("SELECT * FROM rounds WHERE id = ?", (round_id,)).fetchone()
+            if round_row:
+                game = conn.execute("SELECT * FROM games WHERE id = ?", (round_row["game_id"],)).fetchone()
+                category = game["category"] or "سخت"
+                # سوال جدید با همون دسته‌بندی
+                new_q = load_questions(category)
+                if new_q:
+                    # آپدیت سوال در دیتابیس
+                    conn.execute(
+                        "UPDATE rounds SET question = ?, correct_answer = ? WHERE id = ?",
+                        (new_q["question"], new_q["answer"], round_id)
+                    )
+                    conn.commit()
+                    conn.close()
+                    # نمایش سوال جدید به مدیر
+                    send_message(
+                        chat_id,
+                        f"🔄 **سوال جدید:**\n\n"
+                        f"🎲 {new_q['question']}\n\n"
+                        f"✅ جواب درست: ||{new_q['answer']}||",
+                        reply_markup=inline_keyboard([
+                            [button("🔄 تغییر سوال", f"change_question:{round_id}")],
+                            [button("📤 ارسال به بازیکنان", f"send_question:{round_id}")]
+                        ])
+                    )
+                else:
+                    conn.close()
+                    send_message(chat_id, "❌ سوال دیگه‌ای برای این دسته‌بندی پیدا نشد.")
+        if callback_id:
+            answer_callback(callback_id)
+        elif action == "send_question":
+        if len(parts) >= 2:
+            round_id = int(parts[1])
+            conn = db()
+            round_row = conn.execute("SELECT * FROM rounds WHERE id = ?", (round_id,)).fetchone()
+            if round_row:
+                game = conn.execute("SELECT * FROM games WHERE id = ?", (round_row["game_id"],)).fetchone()
+                # ارسال سوال به همه بازیکنان
+                players = conn.execute("""
+                    SELECT p.user_id, p.name FROM round_players rp
+                    JOIN players p ON p.id = rp.player_id
+                    WHERE rp.round_id = ?
+                """, (round_id,)).fetchall()
+                
+                for p in players:
+                    send_message(
+                        p["user_id"],
+                        f"🎲 **دور جدید - سوال:**\n\n"
+                        f"📝 {round_row['question']}\n\n"
+                        f"⏳ لطفاً جواب خودتون رو به صورت متن بفرستید."
+                    )
+                
+                # ارسال کنترل به مدیر
+                send_message(
+                    chat_id,
+                    f"✅ **سوال به {len(players)} بازیکن ارسال شد!**\n\n"
+                    f"📝 سوال: {round_row['question']}\n"
+                    f"✅ جواب درست: ||{round_row['answer']}||\n\n"
+                    f"⏳ منتظر جواب بازیکنان...",
+                    reply_markup=inline_keyboard([
+                        [button("🛑 پایان زمان جواب‌دهی", f"end_answers:{round_id}")]
+                    ])
+                )
+            conn.close()
+        if callback_id:
+            answer_callback(callback_id)
+
         
     else:
         if callback_id:
