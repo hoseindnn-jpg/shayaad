@@ -11,7 +11,6 @@ from datetime import datetime
 # ==================== CONFIG ====================
 app = Flask(__name__)
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-BASE_URL = os.environ.get("BASE_URL")
 BOT_USERNAME = os.environ.get("BOT_USERNAME")
 DB_PATH = os.environ.get("DB_PATH", "bot.db")
 QUESTIONS_FILE = os.environ.get("QUESTIONS_FILE", "questions.json")
@@ -59,15 +58,16 @@ def db():
 
 # ==================== TELEGRAM API ====================
 def tg_request(method, data=None):
-    url = f"{TELEGRAM_API}/{method}"   
+    url = f"{TELEGRAM_API}/{method}"
     try:
         r = requests.post(url, json=data, timeout=10)
         return r.json()
     except Exception as e:
         print(f"Telegram API error: {e}")
-        return None
+        return {"ok": False, "description": str(e)}  
 
-def send_message(chat_id, text, reply_markup=None, parse_mode="Markdown"):
+
+def send_message(chat_id, text, reply_markup=None, parse_mode="HTML"):
     return tg_request("sendMessage", {
         "chat_id": chat_id,
         "text": text,
@@ -1151,22 +1151,21 @@ def handle_message(message):
         return
 
     # دستورات عمومی
-    if text == "/start":
-        if " " in text:
-            # پیوستن به بازی
-            parts = text.split(" ")
-            game_code = parts[1].strip()
-            join_game_start(chat_id, user_id, game_code)
-        else:
-            send_message(
-                chat_id,
-                "🎮 **به بازی گروهی شیاد خوش اومدی!**\n\n"
-                "برای شروع:\n"
-                "• `/newgame` — ساخت بازی جدید\n"
-                "• `/help` — راهنما",
-                parse_mode="Markdown"
-            )
-        return
+    if tex.startswith("/start"):
+    parts = text.split(" ", 1)
+    if len(parts) > 1:
+        game_code = parts[1].strip()
+        join_game_start(chat_id, user_id, game_code)
+    else:
+        send_message(
+            chat_id,
+            "🎮 **به بازی گروهی شیاد خوش اومدی!**\n\n"
+           "برای شروع:\n"
+            "• `/newgame` — ساخت بازی جدید\n"
+            "• `/help` — راهنما",
+            parse_mode="Markdown"
+        )
+    return
 
     if text == "/newgame":
         create_game(chat_id, user_id)
@@ -1282,11 +1281,13 @@ def set_webhook():
 
 @app.route("/delete-webhook")
 def delete_webhook():
-    url = f"{TELEGRAM_API}/setWebhook"
+    url = f"{TELEGRAM_API}/deleteWebhook"
     r = requests.post(url)
     return jsonify(r.json())
 
 # ==================== MAIN ====================
 if __name__ == "__main__":
     init_db()
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
+
