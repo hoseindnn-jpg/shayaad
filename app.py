@@ -68,12 +68,16 @@ def tg_request(method, data=None):
 
 
 def send_message(chat_id, text, reply_markup=None, parse_mode="HTML"):
-    return tg_request("sendMessage", {
+    result = tg_request("sendMessage", {
         "chat_id": chat_id,
         "text": text,
         "reply_markup": reply_markup,
         "parse_mode": parse_mode
     })
+    if not result.get("ok"):
+        print(f"❌ ارسال پیام به {chat_id} ناموفق: {result.get('description', 'خطای ناشناخته')}")
+    return result
+
 
 def answer_callback(callback_id, text=None):
     return tg_request("answerCallbackQuery", {
@@ -816,25 +820,30 @@ def finalize_round(round_id):
     game = get_game_by_id(round_data["game_id"])
     game_code = game["code"]
 
-    # پیدا کردن گزینه درست
     conn = db()
+    
+    # پیدا کردن گزینه درست
     correct_option = conn.execute(
         "SELECT * FROM options WHERE round_id = ? AND is_correct = 1",
         (round_id,)
     ).fetchone()
 
-    # رأی‌های درست: هرکس به گزینه درست رأی داده
+    # محاسبه امتیازهای این دور
+    round_scores = {}
+    
+    # ۱. رأی‌دهندگان درست +۱ امتیاز
     correct_voters = conn.execute("""
-        SELECT v.voter_id, p.user_id, p.name FROM votes v
-        JOIN players p ON p.id = v.voter_id
+        SELECT v.voter_id FROM votes v
         WHERE v.round_id = ? AND v.option_id = ?
     """, (round_id, correct_option["id"])).fetchall()
-
-    # به رأی‌دهندگان درست +1 امتیاز کلی
+    
     for cv in correct_voters:
-        conn.execute("UPDATE players SET score = score + 1 WHERE id = ?", (cv["voter_id"],))
+        player_id = cv["voter_id"]
+        round_scores[player_id] = round_scores.get(player_id, 0) + 1
+        # به‌روزرسانی امتیاز کل
+        conn.execute("UPDATE players SET score = score + 1 WHERE id = ?", (player_id,))
 
-    # محاسبه امتیاز پاسخ‌های اشتباه
+    # ۲. برای هر جواب اشتباه، به نویسنده‌اش تعداد رأی‌ها امتیاز
     wrong_options = conn.execute("""
         SELECT * FROM options WHERE round_id = ? AND is_correct = 0
     """, (round_id,)).fetchall()
@@ -846,29 +855,30 @@ def finalize_round(round_id):
                 (round_id, opt["id"])
             ).fetchone()["cnt"]
             if vote_count > 0:
+                player_id = opt["player_id"]
+                round_scores[player_id] = round_scores.get(player_id, 0) + vote_count
+                # به‌روزرسانی امتیاز کل
                 conn.execute(
                     "UPDATE players SET score = score + ? WHERE id = ?",
-                    (vote_count, opt["player_id"])
+                    (vote_count, player_id)
                 )
 
-    # ثبت امتیاز این دور در round_players
-    all_round_players = conn.execute("""
-        SELECT rp.player_id, p.score FROM round_players rp
-        JOIN players p ON p.id = rp.player_id
-        WHERE rp.round_id = ?
-    """, (round_id,)).fetchall()
-
-    # محاسبه امتیاز کسب‌شده در این دور
-    for rp in all_round_players:
+    # ۳. ذخیره امتیاز این دور در round_players
+    for player_id, score in round_scores.items():
         conn.execute(
-            "UPDATE round_players SET score = (SELECT score FROM players WHERE id = ?) WHERE round_id = ? AND player_id = ?",
-            (rp["player_id"], round_id, rp["player_id"])
+            "UPDATE round_players SET score = ? WHERE round_id = ? AND player_id = ?",
+            (score, round_id, player_id)
         )
+
+    # ۴. برای بازیکنانی که امتیاز نگرفتن، صفر ثبت کن
+    conn.execute("""
+        UPDATE round_players SET score = 0 
+        WHERE round_id = ? AND score IS NULL
+    """, (round_id,))
 
     # پایان دور
     conn.execute("UPDATE rounds SET status = 'finished', finished_at = ? WHERE id = ?", (now(), round_id))
     conn.commit()
-
     # گرفتن جدول امتیازات
     players = get_players(game["id"])
     conn.close()
@@ -972,12 +982,15 @@ def apply_penalty(round_id, penalized_player_id):
         conn.close()
         return None
 
-    score_to_deduct = rp["score"]
+    score_to_deduct = rp["score"]  # امتیاز این دور
 
+    # صفر کردن امتیاز این دور و علامت جریمه
     conn.execute(
         "UPDATE round_players SET score = 0, penalty = 1 WHERE round_id = ? AND player_id = ?",
         (round_id, penalized_player_id)
     )
+    
+    # کم کردن از امتیاز کل بازیکن
     conn.execute(
         "UPDATE players SET score = score - ? WHERE id = ?",
         (score_to_deduct, penalized_player_id)
@@ -985,6 +998,7 @@ def apply_penalty(round_id, penalized_player_id):
     conn.commit()
     conn.close()
     return score_to_deduct
+
 
 def recalculate_and_broadcast(round_id):
     round_data = get_round(round_id)
@@ -1153,19 +1167,19 @@ def handle_message(message):
     # دستورات عمومی
     if text.startswith("/start"):
         parts = text.split(" ", 1)
-    if len(parts) > 1:
-        game_code = parts[1].strip()
-        join_game_start(chat_id, user_id, game_code)
-    else:
-        send_message(
-            chat_id,
-            "🎮 **به بازی گروهی شیاد خوش اومدی!**\n\n"
-           "برای شروع:\n"
-            "• `/newgame` — ساخت بازی جدید\n"
-            "• `/help` — راهنما",
-            parse_mode="Markdown"
-        )
-    return
+        if len(parts) > 1:
+            game_code = parts[1].strip()
+            join_game_start(chat_id, user_id, game_code)
+        else:
+            send_message(
+                chat_id,
+                "🎮 **به بازی گروهی شیاد خوش اومدی!**\n\n"
+               "برای شروع:\n"
+                "• `/newgame` — ساخت بازی جدید\n"
+                "• `/help` — راهنما",
+                parse_mode="Markdown"
+            )
+        return
 
     if text == "/newgame":
         create_game(chat_id, user_id)
