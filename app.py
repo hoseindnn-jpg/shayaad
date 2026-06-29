@@ -355,7 +355,7 @@ def start_new_round(chat_id, user_id, game_code):
     # ارسال سوال به همه بازیکنان
     for p in players:
         send_message(
-            p["chat_id"],
+            p["user_id"],
             f"🎲 **دور جدید - سوال:**\n{q['question']}\n\n"
             "📝 **جواب اشتباه ولی باورپذیر خودت رو بفرست**\n"
             "(توجه: جواب درست رو نفرست!)"
@@ -495,7 +495,7 @@ def close_answers_and_prepare_options(round_id):
     game = conn.execute("SELECT * FROM games WHERE id = ?", (round_row["game_id"],)).fetchone()
     owner_chat = game["owner_chat_id"]
     players = conn.execute("""
-        SELECT p.chat_id, p.id FROM round_players rp
+        SELECT p.user_id, p.id FROM round_players rp
         JOIN players p ON p.id = rp.player_id
         WHERE rp.round_id = ?
     """, (round_id,)).fetchall()
@@ -504,7 +504,7 @@ def close_answers_and_prepare_options(round_id):
                               conn.execute("SELECT * FROM options WHERE round_id = ? ORDER BY option_number",
                                            (round_id,)).fetchall()])
     for p in players:
-        send_message(p["chat_id"],
+        send_message(p["user_id"],
                      f"🗳 **رأی‌گیری شروع شد!**\n\nسوال: {round_row['question']}\n\nگزینه‌ها:\n{option_text}\n\n"
                      "لطفاً **فقط شماره گزینه** درست رو بفرست.")
 
@@ -664,9 +664,9 @@ def finalize_round(round_id):
     leaderboard += f"\n✅ جواب درست: **{round_row['correct_answer']}**"
 
     # ارسال به همه
-    all_players = conn.execute("SELECT chat_id FROM players WHERE game_id = ?", (gm["id"],)).fetchall()
+    all_players = conn.execute("SELECT user_id FROM players WHERE game_id = ?", (gm["id"],)).fetchall()
     for p in all_players:
-        send_message(p["chat_id"], leaderboard)
+        send_message(p["user_id"], leaderboard)
 
     # دکمه‌های مدیر
     send_message(
@@ -772,9 +772,9 @@ def recalculate_and_broadcast(round_id):
         leaderboard += f"{medal} {p['name']}: {p['round_score']}{penalty_text} امتیاز (کل: {p['score']})\n"
     
     # ارسال به همه بازیکنان
-    all_players = conn.execute("SELECT chat_id FROM players WHERE game_id = ?", (game["id"],)).fetchall()
+    all_players = conn.execute("SELECT user_id FROM players WHERE game_id = ?", (game["id"],)).fetchall()
     for pl in all_players:
-        send_message(pl["chat_id"], leaderboard)
+        send_message(pl["user_id"], leaderboard)
     
     # اگر مدیر بازیکن نیست
     if not any(p["id"] == game["owner_id"] for p in players):
