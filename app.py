@@ -1152,7 +1152,7 @@ def handle_message(message):
 
     # دستورات عمومی
     if tex.startswith("/start"):
-    parts = text.split(" ", 1)
+        parts = text.split(" ", 1)
     if len(parts) > 1:
         game_code = parts[1].strip()
         join_game_start(chat_id, user_id, game_code)
