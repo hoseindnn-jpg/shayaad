@@ -733,20 +733,46 @@ def show_penalty_player_list(round_id, user_id, chat_id):
     )
 
 def apply_penalty(round_id, player_id):
-    """اعمال جریمه به بازیکن"""
+    """اعمال جریمه به بازیکن - فقط امتیاز دور صفر می‌شود"""
     conn = db()
+    
     # چک اینکه قبلاً جریمه نشده باشد
-    existing = conn.execute("SELECT penalty FROM round_players WHERE round_id = ? AND player_id = ?",
-                           (round_id, player_id)).fetchone()
+    existing = conn.execute(
+        "SELECT penalty FROM round_players WHERE round_id = ? AND player_id = ?",
+        (round_id, player_id)
+    ).fetchone()
+    
     if existing and existing["penalty"]:
         conn.close()
         return None
 
-    # محاسبه امتیاز کسر شده (مثلاً ۳ امتیاز)
-    deduction = 3
-    conn.execute("UPDATE round_players SET penalty = ? WHERE round_id = ? AND player_id = ?",
-                 (deduction, round_id, player_id))
-    conn.execute("UPDATE players SET score = score - ? WHERE id = ?", (deduction, player_id))
+    deduction = 3  # مقدار جریمه (فقط برای نمایش)
+
+    # ۱. صفر کردن امتیاز همون دور
+    conn.execute(
+        "UPDATE round_players SET score = 0, penalty = ? WHERE round_id = ? AND player_id = ?",
+        (deduction, round_id, player_id)
+    )
+
+    # ۲. به‌روزرسانی امتیاز کل بر اساس مجموع واقعی همه دورهای این بازیکن در این بازی
+    round_row = conn.execute(
+        "SELECT game_id FROM rounds WHERE id = ?", (round_id,)
+    ).fetchone()
+
+    if round_row:
+        game_id = round_row["game_id"]
+        total_score = conn.execute("""
+            SELECT COALESCE(SUM(rp.score), 0)
+            FROM round_players rp
+            JOIN rounds r ON r.id = rp.round_id
+            WHERE r.game_id = ? AND rp.player_id = ?
+        """, (game_id, player_id)).fetchone()[0]
+
+        conn.execute(
+            "UPDATE players SET score = ? WHERE id = ?",
+            (total_score, player_id)
+        )
+
     conn.commit()
     conn.close()
     return deduction
