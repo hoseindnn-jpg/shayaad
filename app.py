@@ -959,7 +959,7 @@ def handle_callback(chat_id, user_id, callback_data, callback_id=None):
                     send_message(
                         chat_id,
                         f"🔄 **سوال جدید:**\n\n"
-                        f"🎲 {new_q['question']}\n\n"
+                        f"🎲 {new_q['question']}\n\n",
                         reply_markup=inline_keyboard([
                             [button("🔄 تغییر سوال", f"change_question:{round_id}")],
                             [button("📤 ارسال به بازیکنان", f"send_question:{round_id}")]
