@@ -997,7 +997,6 @@ def handle_callback(chat_id, user_id, callback_data, callback_id=None):
                     chat_id,
                     f"✅ **سوال به {len(players)} بازیکن ارسال شد!**\n\n"
                     f"📝 سوال: {round_row['question']}\n"
-                    f"✅ جواب درست: ||{round_row['answer']}||\n\n"
                     f"⏳ منتظر جواب بازیکنان...",
                     reply_markup=inline_keyboard([
                         [button("🛑 پایان زمان جواب‌دهی", f"end_answers:{round_id}")]
