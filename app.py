@@ -402,7 +402,7 @@ def handle_answer_message(chat_id, user_id, text):
     # چک اینکه جواب درست نباشه
     if normalize(text) == normalize(row["correct_answer"]):
         conn.close()
-        send_message(chat_id, "⚠️ نمیتونی جواب درست رو بفرستی! یه جواب اشتباه بده.")
+        send_message(chat_id, "⚠️ جوابت تکراری هست یه جواب دیگه بده")
         return True
 
     # ثبت جواب
@@ -599,58 +599,136 @@ def request_end_voting(round_id, chat_id, user_id):
     conn.close()
 
 # ==================== FINALIZE ROUND & SCORING ====================
+import datetime
+
 def finalize_round(round_id):
-    """محاسبه امتیازات و نمایش نتایج"""
+    """محاسبه امتیازات، ثبت جریمه‌ها و نمایش تفکیکی نتایج و جدول امتیازات"""
     conn = db()
+    # برای دسترسی به ستون‌ها با نام فیلد
+    conn.row_factory = sqlite3.Row 
+    
     round_row = conn.execute("SELECT * FROM rounds WHERE id = ?", (round_id,)).fetchone()
     if not round_row or round_row["status"] != "voting":
         conn.close()
         return
 
-    # آپدیت وضعیت
-    conn.execute("UPDATE rounds SET status = 'finished', finished_at = ? WHERE id = ?",
-                 (datetime.datetime.now().isoformat(), round_id))
+    # ۱. آپدیت وضعیت دور به پایان یافته
+    conn.execute(
+        "UPDATE rounds SET status = 'finished', finished_at = ? WHERE id = ?",
+        (datetime.datetime.now().isoformat(), round_id)
+    )
 
-    # یافتن گزینه درست
-    correct_option = conn.execute("SELECT id, option_number FROM options WHERE round_id = ? AND is_correct = 1",
-                                  (round_id,)).fetchone()
+    # ۲. یافتن گزینه درست
+    correct_option = conn.execute(
+        "SELECT id, option_text FROM options WHERE round_id = ? AND is_correct = 1",
+        (round_id,)
+    ).fetchone()
+    
+    correct_option_id = correct_option["id"] if correct_option else None
+    correct_text = correct_option["option_text"] if correct_option else round_row.get("correct_answer", "نامشخص")
 
-    # محاسبه امتیاز هر رأی دهنده
+    # ۳. دریافت همه آرای ثبت شده در این دور
     votes_list = conn.execute("""
-        SELECT v.voter_id, v.option_id, o.is_correct
+        SELECT v.voter_id, v.option_id, o.is_correct, o.player_id as author_id
         FROM votes v
         JOIN options o ON o.id = v.option_id
         WHERE v.round_id = ?
     """, (round_id,)).fetchall()
 
-    # دیکشنری امتیاز برای بازیکن
+    # ۴. مقداردهی اولیه امتیاز بازیکنان این دور
     player_scores = {}
-    # ابتدا صفر
     players_in_round = conn.execute("SELECT player_id FROM round_players WHERE round_id = ?", (round_id,)).fetchall()
     for p in players_in_round:
         player_scores[p["player_id"]] = 0
 
-    # امتیاز رأی‌دهندگان درست
+    correct_voters_ids = []  # برای نگهداری آی‌دی کسانی که درست حدس زدند
+
+    # ۵. محاسبه امتیازات بر اساس قوانین بازی
     for v in votes_list:
         if v["is_correct"]:
+            # رأی‌دهنده پاسخ درست داده است
             player_scores[v["voter_id"]] = player_scores.get(v["voter_id"], 0) + 1
+            correct_voters_ids.append(v["voter_id"])
         else:
-            # رأی به گزینه اشتباه -> نویسنده گزینه اشتباه امتیاز می‌گیرد
-            author = conn.execute("SELECT player_id FROM options WHERE id = ?", (v["option_id"],)).fetchone()
-            if author and author["player_id"]:
-                player_scores[author["player_id"]] = player_scores.get(author["player_id"], 0) + 1
+            # رأی به گزینه اشتباه -> نویسنده گزینه اشتباه امتیاز فریب دادن می‌گیرد
+            author_id = v["author_id"]
+            if author_id and author_id in player_scores:
+                player_scores[author_id] = player_scores.get(author_id, 0) + 1
 
-    # ذخیره امتیازات در round_players.score
-    for pid, score in player_scores.items():
-        conn.execute("UPDATE round_players SET score = ? WHERE round_id = ? AND player_id = ?",
-                     (score, round_id, pid))
-        # به امتیاز کل هم اضافه می‌شود
-        conn.execute("UPDATE players SET score = score + ? WHERE id = ?", (score, pid))
+    # ۶. به‌روزرسانی امتیازات در دیتابیس (با استفاده از تراکنش)
+    try:
+        for pid, score in player_scores.items():
+            # امتیاز این دور در جدول round_players
+            conn.execute(
+                "UPDATE round_players SET score = ? WHERE round_id = ? AND player_id = ?",
+                (score, round_id, pid)
+            )
+            # افزایش امتیاز کل در جدول players
+            conn.execute(
+                "UPDATE players SET score = score + ? WHERE id = ?",
+                (score, pid)
+            )
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        # در صورت بروز خطا لاگ گرفته می‌شود
+        print(f"Error updating scores: {e}")
+        conn.close()
+        return
 
-    conn.commit()
-
-    # --- ساخت جدول نتایج ---
+    # ۷. واکشی اطلاعات بازیکنان برای خروجی‌ها
     gm = conn.execute("SELECT * FROM games WHERE id = ?", (round_row["game_id"],)).fetchone()
+    
+    # پیدا کردن نام کسانی که درست حدس زده‌اند
+    correct_voters_names = []
+    if correct_voters_ids:
+        placeholders = ','.join('?' for _ in correct_voters_ids)
+        voters_rows = conn.execute(
+            f"SELECT name FROM players WHERE id IN ({placeholders})",
+            correct_voters_ids
+        ).fetchall()
+        correct_voters_names = [r["name"] for r in voters_rows]
+
+    # ۸. استخراج گزینه‌های اشتباهی که رأی آورده‌اند به همراه فرستنده و تعداد رأی (مرتب شده نزولی)
+    wrong_options_with_votes = conn.execute("""
+        SELECT o.option_text, p.name as author_name, COUNT(v.id) as vote_count
+        FROM options o
+        JOIN players p ON o.player_id = p.id
+        JOIN votes v ON v.option_id = o.id
+        WHERE o.round_id = ? AND o.is_correct = 0
+        GROUP BY o.id
+        HAVING vote_count > 0
+        ORDER BY vote_count DESC
+    """, (round_id,)).fetchall()
+
+    # ۹. ساخت پیام اول: نتایج پاسخ‌ها
+    # پیدا کردن شماره دور فعلی
+    round_number = conn.execute(
+        "SELECT COUNT(id) as r_num FROM rounds WHERE game_id = ? AND id <= ?",
+        (gm["id"], round_id)
+    ).fetchone()["r_num"]
+
+    results_msg = f"📝 **نتیجه دور {round_number}**\n\n"
+    results_msg += f"✅ **جواب درست:**\n{correct_text}\n\n"
+    
+    results_msg += "👤 **کسایی که جواب درست رو پیدا کردن:**\n"
+    if correct_voters_names:
+        for name in correct_voters_names:
+            results_msg += f"- {name}\n"
+    else:
+        results_msg += "- هیچ‌کس!\n"
+        
+    results_msg += "\n--------------------\n\n"
+    results_msg += "❌ **جواب‌های اشتباه به ترتیب بیشترین رای:**\n\n"
+    
+    if wrong_options_with_votes:
+        for opt in wrong_options_with_votes:
+            results_msg += f"- {opt['option_text']}\n"
+            results_msg += f"  فرستنده: {opt['author_name']} | رای: {opt['vote_count']}\n\n"
+    else:
+        results_msg += "هیچ جواب اشتباهی رأی نیاورد.\n"
+
+    # ۱۰. ساخت پیام دوم: جدول امتیازات (Leaderboard)
     players = conn.execute("""
         SELECT p.id, p.name, p.score, rp.score as round_score
         FROM players p
@@ -659,30 +737,34 @@ def finalize_round(round_id):
         ORDER BY p.score DESC
     """, (round_id,)).fetchall()
 
-    leaderboard = "🏆 **نتایج این دور:**\n\n"
+    leaderboard = "🏆 **جدول امتیازات:**\n\n"
     medals = ["🥇", "🥈", "🥉"]
     for i, pl in enumerate(players):
         medal = medals[i] if i < 3 else f"{i+1}."
         leaderboard += f"{medal} {pl['name']}: {pl['round_score']} امتیاز (کل: {pl['score']})\n"
 
-    leaderboard += f"\n✅ جواب درست: **{round_row['correct_answer']}**"
-
-    # ارسال به همه
+    # ۱۱. ارسال پیام‌ها به تمام بازیکنان بازی
     all_players = conn.execute("SELECT user_id FROM players WHERE game_id = ?", (gm["id"],)).fetchall()
+    
     for p in all_players:
+        # ارسال پیام اول (جزئیات آرا)
+        send_message(p["user_id"], results_msg)
+        # ارسال پیام دوم (جدول امتیازات)
         send_message(p["user_id"], leaderboard)
 
-    # دکمه‌های مدیر
+    # ۱۲. ارسال کنترل‌پنل مدیریت به ادمین بازی
     send_message(
         gm["owner_chat_id"],
-        "دور تموم شد.",
+        "دور به پایان رسید. مدیریت بازی:",
         reply_markup=inline_keyboard([
             [button("🚀 شروع دور جدید", f"start_round:{gm['code']}")],
             [button("🚫 ثبت جریمه", f"penalty_start:{round_id}")],
             [button("🔄 تغییر دسته‌بندی", f"change_category:{gm['code']}")]
         ])
     )
+    
     conn.close()
+
 # ==================== PENALTY SYSTEM ====================
 _penalty_mappings = {}  # {round_id: {number: player_id}}
 
